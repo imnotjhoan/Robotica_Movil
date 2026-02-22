@@ -1,7 +1,7 @@
 controller_manager:
   ros__parameters:
     update_rate: 30
-    # use_sim_time: true
+    use_sim_time: true
 
     diffdrive_controller:
       type: diff_drive_controller/DiffDriveController
@@ -13,6 +13,7 @@ diffdrive_controller:
   ros__parameters:
 
     publish_rate: 50.0
+    enable_odom_tf: false
 
     base_frame_id: base_link
 
