@@ -39,19 +39,22 @@ def generate_launch_description():
         description='Enable bond connection during node activation')
 
     start_localization_slam_toolbox_node = LifecycleNode(
-        parameters=[
-          slam_params_file,
-          {
-            'use_lifecycle_manager': use_lifecycle_manager,
-            'use_sim_time': use_sim_time
-          }
-        ],
         package='slam_toolbox',
         executable='localization_slam_toolbox_node',
         name='slam_toolbox',
         output='screen',
-        namespace=''
-    )
+        namespace='',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'mode': 'localization',
+            'map_file_name': '/home/santy-estrada/mrad_ws_2601_delta/src/delta_gazebo/maps/ejemplo1_ser',
+            'map_start_pose': [0.0, 0.0, 0.0],
+            'map_frame': 'map',
+            'odom_frame': 'odom',
+            'base_frame': 'base_link',
+            'scan_topic': '/scan',
+            'publish_map': True
+    }])
 
     configure_event = EmitEvent(
         event=ChangeState(
