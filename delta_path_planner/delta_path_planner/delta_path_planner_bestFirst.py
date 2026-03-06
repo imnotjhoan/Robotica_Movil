@@ -165,7 +165,7 @@ class BestFirst(Node):
                     nx, ny = x + dx, y + dy
                     if 0 <= nx < width and 0 <= ny < height and data[ny][nx] >= self.inbounds_thresh:
                         cost += 1  # Arbitrary penalty for proximity to obstacles
-            return cost
+            return 1 if cost > 0 else 0  # Add a small cost if near obstacles
 
         visited = set()
         g = {start: 0}  # Track actual cost to reach each node
@@ -192,7 +192,7 @@ class BestFirst(Node):
                 neighbor = (nx, ny)
                 
                 if in_bounds(nx, ny) and neighbor not in visited:
-                    new_cost = g[current] + 1  + avoid_cost(neighbor)  # Cost from current to neighbor
+                    new_cost = g[current] + 1  # Cost from current to neighbor
                     
                     # Initialize g value if not seen before
                     if neighbor not in g:
@@ -203,7 +203,7 @@ class BestFirst(Node):
                         g[neighbor] = new_cost
                         came_from[neighbor] = current
                         # Push with heuristic as priority (not cost!)
-                        heapq.heappush(queue, (heuristic(neighbor), neighbor))
+                        heapq.heappush(queue, (heuristic(neighbor) + avoid_cost(neighbor), neighbor))
 
         # Reconstruct path
         path = []
