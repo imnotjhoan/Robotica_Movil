@@ -11,6 +11,8 @@ from nav_msgs.msg import Path
 
 import tf2_ros
 from tf2_ros import TransformException
+from std_msgs.msg import Bool
+
 
 # Requires: ros-<distro>-tf2-geometry-msgs
 from tf2_geometry_msgs import do_transform_pose_stamped
@@ -49,6 +51,8 @@ class StanleyNode(Node):
         # Stanley control parameters
         self.declare_parameter("stanley_k", 1.0)
         self.declare_parameter("velocity_softening", 0.1)
+        self.declare_parameter("use_StartFlag", True)
+
 
         # Small eps to avoid division by zero
         self.declare_parameter("eps", 1e-6)
@@ -68,6 +72,7 @@ class StanleyNode(Node):
 
         self.k_stanley = float(self.get_parameter("stanley_k").value)
         self.v_soft = max(float(self.get_parameter("velocity_softening").value), 0.0)
+        self.use_start_flag = bool(self.get_parameter("use_StartFlag").value)
 
         self.eps = float(self.get_parameter("eps").value)
         self.tf_timeout = float(self.get_parameter("tf_timeout_sec").value)
@@ -75,6 +80,18 @@ class StanleyNode(Node):
         # ---- ROS interfaces
         self.cmd_pub = self.create_publisher(TwistStamped, self.cmd_topic, 10)
         self.path_sub = self.create_subscription(Path, self.path_topic, self.on_path, 10)
+        self.start_flag = not self.use_start_flag
+        if self.use_start_flag:
+            self.get_logger().info("Start flag mode enabled. Waiting for /start signal to begin.")
+            self.start_sub = self.create_subscription(
+                Bool,
+                "/start",
+                self.start_callback,
+                10,
+            )
+
+        else:
+            self.get_logger().info("Start flag mode disabled.")
 
         # ---- TF buffer/listener
         self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=5.0))
@@ -95,6 +112,12 @@ class StanleyNode(Node):
             f"v={self.v_nominal:.2f} m/s, rate={self.rate_hz:.1f} Hz"
         )
 
+    def start_callback(self, msg: Bool):
+        if msg.data:
+            if not self.start_flag:
+                self.get_logger().info("Received start signal. Starting control.")
+            self.start_flag = True
+
     def on_path(self, msg: Path) -> None:
         self.path = list(msg.poses)
         self.path_frame = msg.header.frame_id if msg.header.frame_id else None
@@ -111,6 +134,11 @@ class StanleyNode(Node):
     def on_timer(self) -> None:
         # Safety condition: no path -> stop
         if not self.has_path:
+            self.publish_stop()
+            return
+
+        # Optional start gate: remain stopped until /start is received.
+        if self.use_start_flag and not self.start_flag:
             self.publish_stop()
             return
 
@@ -135,6 +163,12 @@ class StanleyNode(Node):
 
         goal_dist = math.hypot(goal_pose_b.pose.position.x, goal_pose_b.pose.position.y)
         if goal_dist <= self.goal_tol:
+            if self.use_start_flag and self.start_flag:
+                self.get_logger().info(
+                    "Goal reached. Stopping and waiting for next /start signal."
+                )
+                # Re-arm the start gate so repeated path updates do not restart motion.
+                self.start_flag = False
             self.publish_stop()
             return
 
