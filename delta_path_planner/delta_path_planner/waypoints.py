@@ -5,6 +5,7 @@ import tf2_ros
 from rclpy.qos import QoSProfile, DurabilityPolicy
 import json
 from nav_msgs.msg import Path
+from std_msgs.msg import Bool
 
 
 
@@ -13,13 +14,13 @@ class WaypointsNode(Node):
         super().__init__('waypoints_node')
         
         # Parameters
-        self.manual = self.declare_parameter('manual', True).value
+        self.manual = self.declare_parameter('manual', False).value
         self.num_points = self.declare_parameter('num_points', 5).value
         self.closed_loop = self.declare_parameter('closed_loop', True).value
         self.waypoints_file = self.declare_parameter('waypoints_file', '/home/santy-estrada/mrad_ws_2601_delta/src/delta_path_planner/waypoints_json/sample_waypoints.json').value
+        self.use_start = self.declare_parameter('use_start', True).value
 
         qos = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=10)
-
         # Subscribers
         if self.manual:
             self.create_subscription(
@@ -34,6 +35,20 @@ class WaypointsNode(Node):
         else:
             self.get_logger().info('Waypoints node in AUTO mode. Loading waypoints from file.')
 
+        if self.use_start:
+            self.get_logger().info('Using robot current position as start point for first waypoint pair.')
+            self.start_sub = self.create_subscription(
+                Bool,
+                '/start',
+                self.start_callback,
+                10
+            )
+            self.start_flag = False
+
+        else:
+            self.get_logger().info('Not using robot position as start point. First waypoint pair will be from first waypoint to second waypoint.')  
+            self.start_flag = True  
+
         # Publishers (using standard Path for now as a temporary solution)
         # In production, this would publish delta_path_planner/WaypointPair
         self.waypoints_pub = self.create_publisher(Path, '/waypoints_topic', qos)
@@ -46,6 +61,7 @@ class WaypointsNode(Node):
         self.collected_waypoints = []
         self.robot_home_position = None
         self.publishing_active = False
+        self.pending_waypoint_paths = []
 
         if not self.manual:
             # In auto mode, delay loading until TF is available (system is ready)
@@ -53,6 +69,40 @@ class WaypointsNode(Node):
             self.auto_mode_loaded = False
         else:
             self.auto_mode_loaded = True
+
+    def start_callback(self, msg: Bool):
+        if msg.data:
+            if not self.start_flag:
+                self.get_logger().info("Received start signal. Starting control.")
+            self.start_flag = True
+            self._publish_pending_waypoints()
+
+    def _publish_pending_waypoints(self):
+        """Publish any waypoint paths queued while waiting for start signal."""
+        if not self.pending_waypoint_paths:
+            return
+
+        queued_paths = self.pending_waypoint_paths
+        self.pending_waypoint_paths = []
+        self.get_logger().info(
+            f'Publishing {len(queued_paths)} queued waypoint path message(s).'
+        )
+
+        for path, waypoint_pairs in queued_paths:
+            self._publish_path(path, waypoint_pairs)
+
+    def _publish_path(self, path: Path, waypoint_pairs):
+        """Publish a Path and log all waypoint pairs it contains."""
+        self.waypoints_pub.publish(path)
+        self.get_logger().info(f'Published {len(waypoint_pairs)} waypoint pairs to /waypoints_topic')
+
+        for i, pair in enumerate(waypoint_pairs):
+            start_pos = pair['start'].pose.position
+            goal_pos = pair['goal'].pose.position
+            self.get_logger().info(
+                f'  Pair {i}: ({start_pos.x:.2f}, {start_pos.y:.2f}) -> '
+                f'({goal_pos.x:.2f}, {goal_pos.y:.2f})'
+            )
 
     def goal_pose_callback(self, msg):
         """Collect waypoint from goal_pose topic in manual mode."""
@@ -179,15 +229,12 @@ class WaypointsNode(Node):
             path.poses.append(pair['start'])
             path.poses.append(pair['goal'])
 
-        self.waypoints_pub.publish(path)
-        
-        self.get_logger().info(f'Published {len(waypoint_pairs)} waypoint pairs to /waypoints_topic')
-        for i, pair in enumerate(waypoint_pairs):
-            start_pos = pair['start'].pose.position
-            goal_pos = pair['goal'].pose.position
+        if self.start_flag:
+            self._publish_path(path, waypoint_pairs)
+        else:
+            self.pending_waypoint_paths.append((path, waypoint_pairs))
             self.get_logger().info(
-                f'  Pair {i}: ({start_pos.x:.2f}, {start_pos.y:.2f}) -> '
-                f'({goal_pos.x:.2f}, {goal_pos.y:.2f})'
+                'Start signal not received yet. Waypoint pairs are ready and queued for publishing.'
             )
 
 
