@@ -7,7 +7,7 @@ import math
 import heapq
 import time
 from collections import deque
-from typing import List, Tuple, Optional, Dict, Set
+from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 
@@ -17,14 +17,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from nav_msgs.msg import OccupancyGrid, Path
 from geometry_msgs.msg import PoseStamped, Quaternion
-from tf2_geometry_msgs import do_transform_pose
 import tf2_ros
-from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from dataclasses import dataclass
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from std_msgs.msg import ColorRGBA
-from nav_msgs.srv import GetPlan
 
 @dataclass
 class ARANode:
@@ -51,8 +48,8 @@ class ARAPlannerNode(Node):
         # --- ParÃ¡metros de ROS 2 (Reciclados de Dijkstra) ---
         self.declare_parameter('topics.map_topic', '/map')
         self.declare_parameter('topics.goal_topic', '/goal_pose')
-        self.declare_parameter('topics.path_topic', '/planned_path')
-        self.declare_parameter('plan_service', '/get_plan')
+        self.declare_parameter('topics.path_topic', '/ara_path')
+        self.use_waypoints = self.declare_parameter('waypoints', True).value
 
         self.declare_parameter('frames.base_frame', 'base_link')
         self.declare_parameter('frames.global_frame', 'map')
@@ -86,15 +83,21 @@ class ARAPlannerNode(Node):
         goal_topic = self.get_parameter('topics.goal_topic').get_parameter_value().string_value
         path_topic = self.get_parameter('topics.path_topic').get_parameter_value().string_value
         debug_topic = self.get_parameter('topics.debug_paths').get_parameter_value().string_value
-        plan_srv_name = self.get_parameter('plan_service').get_parameter_value().string_value
 
-        self.goal_sub = self.create_subscription(PoseStamped, goal_topic, self.goal_cb, 10)
+        qos_waypoints = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=10)
+
+        if self.use_waypoints:
+            self.create_subscription(Path, '/waypoints_topic', self.waypoints_callback, qos_waypoints)
+            self.get_logger().info('ARA node in WAYPOINTS mode')
+        else:
+            self.create_subscription(PoseStamped, goal_topic, self.goal_cb, 10)
+            self.get_logger().info('ARA node in GOAL_POSE mode')
+
         self.path_pub = self.create_publisher(Path, path_topic, 10)
         self.debug_paths_pub = self.create_publisher(MarkerArray, debug_topic, 10)
-        self.plan_srv = self.create_service(GetPlan, plan_srv_name, self.get_plan_cb)
 
         qos_map = QoSProfile(
-            depth=1,
+            depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
@@ -108,6 +111,7 @@ class ARAPlannerNode(Node):
         self._map: Optional[OccupancyGrid] = None
         self._obstacles: Optional[np.ndarray] = None
         self._dist_cells: Optional[np.ndarray] = None
+        self.waypoint_pairs = []
         if self._debug_mode:
             self.get_logger().info("ARA* Planner Node Iniciado con los siguientes parÃ¡metros:" \
             f"- Epsilon Start: {self.get_parameter('ara_core.epsilon_start').get_parameter_value().double_value}" \
@@ -118,7 +122,6 @@ class ARAPlannerNode(Node):
             f"- Inflate Radius: {self.get_parameter('geometry.inflate_radius').get_parameter_value().double_value}")
 
         self.get_logger().info("ARA* Planner Node Iniciado y esperando el mapa...")
-        self.get_logger().info(f"Servicio de ARA* activo en: {plan_srv_name}")
 
     # =================================================================
     # CALLBACKS DE ROS 2
@@ -218,56 +221,50 @@ class ARAPlannerNode(Node):
             self.get_logger().info("Â¡Ruta ARA* publicada!")
         else:
             self.get_logger().error("ARA* fallÃ³ al encontrar una ruta.")
-    
-    def get_plan_cb(self, request, response):
+
+    def waypoints_callback(self, msg: Path):
+        """Handle waypoint pairs from waypoints_topic.
+
+        Path.poses are structured as: [start_0, goal_0, start_1, goal_1, ...]
         """
-        Callback del servicio /get_plan.
-        Recibe un Request con (start, goal) y devuelve un Response con (plan).
-        """
-        self.get_logger().info("Â¡Solicitud de ruta recibida por Servicio!")
+        self.waypoint_pairs = []
 
-        if self._map is None or self._obstacles is None:
-            self.get_logger().warn("No hay mapa todavÃ­a. Rechazando solicitud.")
-            return response  # Devuelve la respuesta vacÃ­a
+        for i in range(0, len(msg.poses) - 1, 2):
+            start = msg.poses[i]
+            goal = msg.poses[i + 1]
+            self.waypoint_pairs.append({'start': start, 'goal': goal})
 
-        # 1. Extraer las poses enviadas por tu compaÃ±ero
-        start_pose = request.start
-        goal_pose = request.goal
+        self.get_logger().info(f'Received {len(self.waypoint_pairs)} waypoint pairs')
+        self.plan_waypoint_paths()
 
-        # (Opcional pero recomendado) ValidaciÃ³n de seguridad: 
-        # Si tu compaÃ±ero enviÃ³ un start_pose vacÃ­o (sin frame_id),
-        # usamos el TF del robot como respaldo de emergencia.
-        if not start_pose.header.frame_id:
-            self.get_logger().warn("El Request no trajo Start Pose. Usando TF del robot...")
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    self.get_parameter('global_frame').value,
-                    self.get_parameter('base_frame').value,
-                    rclpy.time.Time()
-                )
-                start_pose.header.frame_id = self.get_parameter('global_frame').value
-                start_pose.pose.position.x = transform.transform.translation.x
-                start_pose.pose.position.y = transform.transform.translation.y
-            except Exception as e:
-                self.get_logger().error(f"Error TF de emergencia: {e}")
-                return response
+    def plan_waypoint_paths(self):
+        """Plan paths for all waypoint pairs and publish as single combined path."""
+        if self._map is None or self._obstacles is None or not self.waypoint_pairs:
+            self.get_logger().warn('Map or waypoint pairs not available')
+            return
 
-        # 2. Â¡Llamar a tu motor matemÃ¡tico intacto!
-        path_msg = self.plan_ara_star(start_pose, goal_pose)
+        combined_path = Path()
+        combined_path.header.frame_id = self.get_parameter('frames.global_frame').value
 
-        # 3. Empaquetar y devolver la respuesta
-        if path_msg is not None:
-            response.plan = path_msg
-            
-            # TambiÃ©n lo publicamos en el tÃ³pico normal para que 
-            # lo puedas ver dibujado en RViz mientras tu compaÃ±ero hace sus pruebas
-            self.path_pub.publish(path_msg)
-            
-            self.get_logger().info("Â¡Ruta calculada con Ã©xito y devuelta al cliente!")
-        else:
-            self.get_logger().error("ARA* fallÃ³ al encontrar una ruta para el servicio.")
+        for i, pair in enumerate(self.waypoint_pairs):
+            path_msg = self.plan_ara_star(pair['start'], pair['goal'])
+            if path_msg is None or not path_msg.poses:
+                self.get_logger().warn(f'No valid path found for waypoint pair {i}')
+                continue
 
-        return response
+            combined_path.poses.extend(path_msg.poses)
+            self.get_logger().info(
+                f'Waypoint pair {i} path calculated (length: {len(path_msg.poses)})'
+            )
+
+        if not combined_path.poses:
+            self.get_logger().warn('No combined path could be generated from waypoint pairs')
+            return
+
+        self.path_pub.publish(combined_path)
+        self.get_logger().info(
+            f'Published combined path with {len(combined_path.poses)} total poses'
+        )
 
     # =================================================================
     # 4. FUNCIONES AUXILIARES 

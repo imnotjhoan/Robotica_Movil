@@ -80,7 +80,7 @@ class DijkstraNode(Node):
             q.append((x, y))
 
         # 4-connected neighbors for distance
-        for_yx = [(-1,0),(1,0),(0,-1),(0,1)]
+        for_yx = [(-1,0),(1,0),(0,-1),(0,1), (-1,-1), (-1,1), (1,-1), (1,1)]  # 8-connected for more accurate inflation
         while q:
             x, y = q.popleft()
             d = dist[y, x]

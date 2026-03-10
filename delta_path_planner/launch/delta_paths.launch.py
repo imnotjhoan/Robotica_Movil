@@ -8,6 +8,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+use_waypoints = False  # Set to True to enable waypoints mode in planners
+
 
 def generate_launch_description():
 	use_sim_time = LaunchConfiguration("use_sim_time")
@@ -35,7 +37,7 @@ def generate_launch_description():
 		output="screen",
 		parameters=[
 			{"use_sim_time": use_sim_time,
-	         "waypoints": False,  # Set to True to enable waypoints mode
+	         "waypoints": use_waypoints,  # Set to True to enable waypoints mode
 			 }],
 	)
 
@@ -45,7 +47,18 @@ def generate_launch_description():
 		name="best_first_node",
 		output="screen",
 		parameters=[{"use_sim_time": use_sim_time,
-                    "waypoints": False,  # Set to True to enable waypoints mode
+                    "waypoints": use_waypoints,  # Set to True to enable waypoints mode
+            }],
+	)
+
+
+	ara_node = Node(
+		package="delta_path_planner",
+		executable="ara_node",
+		name="ara_node",
+		output="screen",
+		parameters=[{"use_sim_time": use_sim_time,
+                    "waypoints": use_waypoints,  # Set to True to enable waypoints mode
             }],
 	)
 
@@ -67,7 +80,7 @@ def generate_launch_description():
 
 	# Stagger startup so Gazebo and robot interfaces are available first.
 	ekf_after_spawn = TimerAction(period=2.0, actions=[ekf_launch])
-	planners_after_ekf = TimerAction(period=3.0, actions=[dijkstra_node, best_first_node])
+	planners_after_ekf = TimerAction(period=3.0, actions=[dijkstra_node, best_first_node, ara_node])
 	localization_after_planners = TimerAction(
 		period=4.0,
 		actions=[amcl_localization_launch, slam_localization_launch],
