@@ -36,7 +36,7 @@ class WaypointsNode(Node):
             self.get_logger().info('Waypoints node in AUTO mode. Loading waypoints from file.')
 
         if self.use_start:
-            self.get_logger().info('Using robot current position as start point for first waypoint pair.')
+            self.get_logger().info('Start flag mode enabled. Waiting for /start signal to begin publishing waypoints.')
             self.start_sub = self.create_subscription(
                 Bool,
                 '/start',
@@ -46,7 +46,7 @@ class WaypointsNode(Node):
             self.start_flag = False
 
         else:
-            self.get_logger().info('Not using robot position as start point. First waypoint pair will be from first waypoint to second waypoint.')  
+            self.get_logger().info('Start flag mode disabled. Waypoints will be published immediately when ready.')  
             self.start_flag = True  
 
         # Publishers (using standard Path for now as a temporary solution)
