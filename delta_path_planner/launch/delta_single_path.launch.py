@@ -61,7 +61,10 @@ def generate_launch_description():
 		executable="waypoints_node",
 		name="waypoints_node",
 		output="screen",
-		parameters=[{"use_sim_time": use_sim_time}],
+		parameters=[{"use_sim_time": use_sim_time,
+			   "use_start": True,
+			   "manual": False,
+			   "closed_loop": True}],
 		condition=IfCondition(use_waypoints),
 	)
 

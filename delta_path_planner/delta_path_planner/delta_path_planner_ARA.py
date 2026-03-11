@@ -49,7 +49,7 @@ class ARAPlannerNode(Node):
         self.declare_parameter('topics.map_topic', '/map')
         self.declare_parameter('topics.goal_topic', '/goal_pose')
         self.declare_parameter('topics.path_topic', '/ara_path')
-        self.use_waypoints = self.declare_parameter('waypoints', True).value
+        self.use_waypoints = self.declare_parameter('waypoints', False).value
 
         self.declare_parameter('frames.base_frame', 'base_link')
         self.declare_parameter('frames.global_frame', 'map')

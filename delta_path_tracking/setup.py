@@ -30,6 +30,7 @@ setup(
         'console_scripts': [
             'pure_pursuit_node = delta_path_tracking.pure_pursuit:main',
             'stanley_node = delta_path_tracking.stanley:main',
+            'mpc_node = delta_path_tracking.mpc:main',
         ],
     },
 )

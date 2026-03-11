@@ -215,7 +215,7 @@ class TTCBreakNode(Node):
             
             # No brake needed when stopped
             brake_msg = Bool()
-            brake_msg.data = True
+            brake_msg.data = False
             self.brake_pub.publish(brake_msg)
             return
         
