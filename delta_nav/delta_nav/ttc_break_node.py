@@ -22,7 +22,9 @@ class TTCBreakNode(Node):
         self.declare_parameter('min_range', 0.1)                # meters - ignore measurements closer than this
         self.declare_parameter('max_range', 12.0)               # meters - ignore measurements farther than this
         self.declare_parameter("safety_bubble", True)           # If true, consider all measurements within min_distance_threshold as braking threats regardless of TTC
-        
+        self.declare_parameter("heartbeat_rate_hz", 1.0)
+
+
         self.publish_rate = float(self.get_parameter('publish_rate').value)
         self.ttc_threshold = float(self.get_parameter('ttc_threshold').value)
         self.min_distance_threshold = float(self.get_parameter('min_distance_threshold').value)
@@ -31,7 +33,7 @@ class TTCBreakNode(Node):
         self.min_range = float(self.get_parameter('min_range').value)
         self.max_range = float(self.get_parameter('max_range').value)
         self.safety_bubble = bool(self.get_parameter('safety_bubble').value)
-        
+        self.heartbeat_rate_hz = float(self.get_parameter('heartbeat_rate_hz').value)
         # ---- State ----
         self.current_cmd_vel = TwistStamped()    # Last received command velocity
         self.last_laser_scan = None              # Last received laser scan
@@ -39,6 +41,8 @@ class TTCBreakNode(Node):
         self.min_distance = float('inf')         # Minimum distance from all obstacles in relevant zone
         self.should_brake = False                # Flag indicating if emergency brake is needed
         self.brake_trigger_angle = None          # Angle of the measurement that triggered brake
+        self.is_stopped = None                   # Last published /brake_active state
+        self.is_warned = None                    # Last published /brake_warn state
         
         # ---- Pub/Sub ----
         # QoS profile compatible with sensor publishers (RELIABLE, VOLATILE)
@@ -72,6 +76,16 @@ class TTCBreakNode(Node):
         self.dt = 1.0 / self.publish_rate
         self.timer = self.create_timer(self.dt, self._check_ttc_and_publish)
 
+        # heartbeat timer to log that node is alive
+        # self.heartbeat_timer = self.create_timer(1.0 / self.heartbeat_rate_hz, self._heartbeat_callback)
+
+    def _heartbeat_callback(self):
+        # Publish the current state of only the brake state
+        if self.is_stopped is not None:
+            brake_msg = Bool()
+            brake_msg.data = self.is_stopped
+            self.brake_pub.publish(brake_msg)
+
 
     def _laser_scan_callback(self, msg: LaserScan):
         """Store the latest laser scan message."""
@@ -80,6 +94,39 @@ class TTCBreakNode(Node):
     def _cmd_vel_callback(self, msg: TwistStamped):
         """Store the latest commanded velocity from the controller."""
         self.current_cmd_vel = msg
+
+    def _publish_brake_state_if_changed(self, brake_state: bool):
+        """Publish /brake_active only when state changes."""
+        if self.is_stopped == brake_state:
+            return
+
+        brake_msg = Bool()
+        brake_msg.data = brake_state
+        self.brake_pub.publish(brake_msg)
+        self.is_stopped = brake_state
+
+    def _publish_warn_state_if_changed(self, warn_state: bool):
+        """Publish /brake_warn only when state changes."""
+        if not self.safety_bubble:
+            return
+        if self.is_warned == warn_state:
+            return
+        
+        if warn_state:
+            self.get_logger().warn(
+                f"SAFETY BUBBLE ALERT: Obstacle at {warn_state:.2f}m within safety bubble "
+                f"(threshold: {self.min_distance_threshold}m)."
+                f"Issuing brake warning!"
+            )
+        else:
+            self.get_logger().info(
+                "SAFETY BUBBLE CLEAR: No obstacles within safety bubble. Clearing brake warning!"
+            )
+
+        brake_msg = Bool()
+        brake_msg.data = warn_state
+        self.brake_warn_pub.publish(brake_msg)
+        self.is_warned = warn_state
     
     def _calculate_ttc_for_measurement(self, range_val: float, angle: float, 
                                         cmd_linear_x: float) -> float:
@@ -240,10 +287,8 @@ class TTCBreakNode(Node):
             ttc_msg.data = directional_ttc_array
             self.ttc_array_pub.publish(ttc_msg)
             
-            # No brake needed when stopped
-            brake_msg = Bool()
-            brake_msg.data = True
-            self.brake_pub.publish(brake_msg)
+            # Keep existing behavior: publish True on /brake_active while stopped.
+            self._publish_brake_state_if_changed(True)
             return
         
         # Process laser scan measurements
@@ -257,6 +302,9 @@ class TTCBreakNode(Node):
         # Convert angle ranges to radians
         forward_range_rad = math.radians(self.forward_angle_range)
         rear_range_rad = math.radians(self.rear_angle_range)
+        bubble_warn_active = False
+        bubble_warn_distance = float('inf')
+        bubble_warn_angle = None
         
         # Iterate through measurements
         for i, range_val in enumerate(scan_msg.ranges):
@@ -276,26 +324,11 @@ class TTCBreakNode(Node):
 
             # If the safety bubble parameter is enabled, consider any measurement within min_distance_threshold as a threat regardless of TTC
             if self.safety_bubble and range_val < self.min_distance_threshold:
-                # Publish as a break as True to warn
-                brake_msg = Bool()
-                brake_msg.data = True
-                self.brake_warn_pub.publish(brake_msg)
-
-                # Publish brake warn direction
-                dir_msg = Int32()
-                dir_msg.data = self._determine_brake_direction_ang(angle)
-                self.dir_brake_pub.publish(dir_msg)
-
-                self.get_logger().warn(
-                    f"SAFETY BUBBLE ALERT: Obstacle at {range_val:.2f}m within safety bubble (threshold: {self.min_distance_threshold}m). Direction {self._determine_brake_direction_ang(angle)}."
-                    f"Issuing brake warning!"
-                )
+                bubble_warn_active = True
+                if range_val < bubble_warn_distance:
+                    bubble_warn_distance = range_val
+                    bubble_warn_angle = angle
                 continue
-            else:
-                # If outside safety bubble, publish brake warn as False
-                brake_msg = Bool()
-                brake_msg.data = False
-                self.brake_warn_pub.publish(brake_msg)
             
             # Check if measurement is in relevant cone based on direction of motion
             in_relevant_zone = False
@@ -327,6 +360,18 @@ class TTCBreakNode(Node):
         directional_ttc_array = self._compute_directional_ttc_array(
             scan_msg, cmd_linear_x
         )
+
+        # Publish safety-bubble warning only on state transitions.
+        if self.safety_bubble:
+            self._publish_warn_state_if_changed(bubble_warn_active)
+            if bubble_warn_active:
+                dir_msg = Int32()
+                dir_msg.data = self._determine_brake_direction_ang(bubble_warn_angle)
+                self.dir_brake_pub.publish(dir_msg)
+                self.get_logger().warn(
+                    f"(threshold: {self.min_distance_threshold}m). Direction {dir_msg.data}."
+                )
+
          # Agregar valor extra según dirección de movimiento
         if cmd_linear_x >= 0.0:
             directional_ttc_array.append(0.0)
@@ -351,10 +396,8 @@ class TTCBreakNode(Node):
         self.should_brake = ((self.min_ttc < self.ttc_threshold and self.min_ttc != float('inf')) or 
                              (self.min_distance < self.min_distance_threshold))
         
-        # Publish brake state ALWAYS
-        brake_msg = Bool()
-        brake_msg.data = self.should_brake
-        self.brake_pub.publish(brake_msg)
+        # Publish brake state only on state transitions.
+        self._publish_brake_state_if_changed(self.should_brake)
         
         # Publish brake direction
         dir_msg = Int32()

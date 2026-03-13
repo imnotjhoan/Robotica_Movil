@@ -43,7 +43,7 @@ class StanleyNode(Node):
         self.declare_parameter("base_frame", "base_link")
 
         # Control
-        self.declare_parameter("control_rate_hz", 20.0)
+        self.declare_parameter("control_rate_hz", 50.0)
         self.declare_parameter("v_nominal", 1.0)      # m/s (kept constant)
         self.declare_parameter("max_omega", 1.5)      # rad/s
         self.declare_parameter("goal_tolerance", 0.25)
@@ -58,7 +58,7 @@ class StanleyNode(Node):
         self.declare_parameter("ttc_dir_topic", "/dir_brake")
         self.declare_parameter("ttc_turn_boost", 0.7)
         self.declare_parameter("max_omega_ttc", 2.5)
-        self.declare_parameter("pub_errs", False)
+        self.declare_parameter("pub_errs", True)
         self.declare_parameter("cross_track_error_topic", "/stanley/cross_track_error")
         self.declare_parameter("heading_error_topic", "/stanley/heading_error")
         self.declare_parameter("delta_topic", "/stanley/delta")
@@ -184,6 +184,7 @@ class StanleyNode(Node):
         self.path_frame: Optional[str] = None
         self.has_path = False
         self.last_closest_index = 0
+        self.first_run = True
 
         # ---- Timer
         dt = 1.0 / self.rate_hz
@@ -201,10 +202,18 @@ class StanleyNode(Node):
             self.start_flag = True
 
     def ttc_brake_callback(self, msg: Bool) -> None:
-        self.ttc_brake_active = bool(msg.data)
+        if not self.first_run:
+            self.ttc_brake_active = bool(msg.data)
+        if self.pub_debug:
+            state = "ACTIVE" if self.ttc_brake_active else "INACTIVE"
+            self.get_logger().info(f"TTC brake state changed: {state}")
 
     def ttc_brake_warn_callback(self, msg: Bool) -> None:
-        self.ttc_brake_warn_active = bool(msg.data)
+        if not self.first_run:
+            self.ttc_brake_warn_active = bool(msg.data)
+        if self.pub_debug:
+            state = "ACTIVE" if self.ttc_brake_warn_active else "INACTIVE"
+            self.get_logger().info(f"TTC brake WARNING state changed: {state}")
 
     def ttc_dir_callback(self, msg: Int32) -> None:
         direction = int(msg.data)
@@ -269,7 +278,7 @@ class StanleyNode(Node):
 
         if ttc_warning:
             # Warning mode should still steer away, but less aggressively than full brake mode.
-            omega_avoid *= 0.7
+            omega_avoid *= 0.9
 
         omega_avoid = clamp(omega_avoid, -self.max_omega_ttc, self.max_omega_ttc)
 
@@ -335,6 +344,8 @@ class StanleyNode(Node):
             self.publish_stop()
             if self.pub_debug:
                 self.get_logger().info(f"Goal reached (distance {goal_dist:.2f} m).")
+
+            self.first_run = True
             return
 
         # 3) Compute Stanley heading and cross-track errors
@@ -365,6 +376,8 @@ class StanleyNode(Node):
         cmd.twist.linear.x = float(v_cmd)
         cmd.twist.angular.z = float(omega)
         self.cmd_pub.publish(cmd)
+
+        self.first_run = False
 
     def transform_pose_to_base(self, pose_st: PoseStamped, tf) -> Optional[PoseStamped]:
         """Transform PoseStamped from path_frame into base_frame using TF2."""
@@ -421,7 +434,7 @@ class StanleyNode(Node):
         Returns (heading_error, cross_track_error, closest_index).
         """
         n = len(self.path)
-        start = min(max(self.last_closest_index, 0), n - 1)
+        start = min(max(self.last_closest_index-20, 0), n - 1)
 
         cache: Dict[int, Tuple[float, float]] = {}
         closest_idx: Optional[int] = None
