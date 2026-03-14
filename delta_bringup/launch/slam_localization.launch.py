@@ -47,7 +47,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': use_sim_time,
             'mode': 'localization',
-            'map_file_name': '/home/jhoan/mrad_ws_2601_delta2/src/delta_gazebo/maps/empty_race_track2',
+            'map_file_name': '/home/jhoan/mrad_ws_2601_delta2/src/delta_gazebo/maps/obs_race_track_ser',
             'map_start_pose': [0.0, 0.0, 0.0],
             'map_frame': 'map',
             'odom_frame': 'odom',
