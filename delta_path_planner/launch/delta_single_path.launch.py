@@ -103,7 +103,7 @@ def generate_launch_description():
 			),
 			DeclareLaunchArgument(
 				"use_amcl",
-				default_value="false",
+				default_value="true",
 				description="If true launch AMCL; otherwise launch SLAM localization.",
 			),
 			DeclareLaunchArgument(

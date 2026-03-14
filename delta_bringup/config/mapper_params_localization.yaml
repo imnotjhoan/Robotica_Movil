@@ -15,7 +15,7 @@ slam_toolbox:
     mode: localization #localization
 
     # if you'd like to start localizing on bringup in a map and pose
-    map_file_name: /home/santy-estrada/mrad_ws_2601_delta/src/delta_gazebo/maps/map2
+    map_file_name: '/home/jhoan/mrad_ws_2601_delta2/src/delta_gazebo/maps/empty_race_track2'
     map_start_pose: [0.0, 0.0, 0.0]
 
     debug_logging: false
