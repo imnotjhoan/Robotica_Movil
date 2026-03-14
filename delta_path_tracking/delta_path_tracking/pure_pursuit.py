@@ -8,7 +8,7 @@ from rclpy.duration import Duration
 
 from geometry_msgs.msg import TwistStamped, PoseStamped
 from nav_msgs.msg import Path
-from std_msgs.msg import Bool, Float64
+from std_msgs.msg import Bool, Float64, Int32
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -40,10 +40,22 @@ class PurePursuitNode(Node):
         # Control
         self.declare_parameter("control_rate_hz", 20.0)
         self.declare_parameter("v_nominal", 4.5)           # m/s
+        self.declare_parameter("adaptative_v", True)
+        self.declare_parameter("v_min", 1.0)
+        self.declare_parameter("v_max", 5.0)
+        self.declare_parameter("kv_heading", 1.0)
+        self.declare_parameter("v_smoothing_alpha", 0.3)
         self.declare_parameter("max_speed", 10.0)            # m/s
         self.declare_parameter("max_omega", 1.5)            # rad/s
         self.declare_parameter("goal_tolerance", 0.25)      # m
         self.declare_parameter("use_StartFlag", True)
+        self.declare_parameter("use_ttc", True)
+        self.declare_parameter("ttc_brake_topic", "/brake_active")
+        self.declare_parameter("ttc_brake_warn_topic", "/brake_warn")
+        self.declare_parameter("ttc_dir_topic", "/dir_brake")
+        self.declare_parameter("ttc_turn_boost", 0.7)
+        self.declare_parameter("max_omega_ttc", 2.5)
+        self.declare_parameter("pub_debug", True)
         self.declare_parameter("pub_errs", True)
         self.declare_parameter("cross_track_error_topic", "/cross_track_error")
         self.declare_parameter("heading_error_topic", "/heading_error")
@@ -69,10 +81,21 @@ class PurePursuitNode(Node):
         self.rate_hz = float(self.get_parameter("control_rate_hz").value)
 
         self.v_nominal = float(self.get_parameter("v_nominal").value)
+        self.use_adaptative_v = bool(self.get_parameter("adaptative_v").value)
+        self.v_min = max(float(self.get_parameter("v_min").value), 0.0)
+        self.v_max = max(float(self.get_parameter("v_max").value), self.v_min)
+        self.kv_heading = max(float(self.get_parameter("kv_heading").value), 0.0)
+        self.v_smoothing_alpha = clamp(float(self.get_parameter("v_smoothing_alpha").value), 0.0, 1.0)
         self.max_speed = float(self.get_parameter("max_speed").value)
         self.max_omega = float(self.get_parameter("max_omega").value)
         self.goal_tol = float(self.get_parameter("goal_tolerance").value)
         self.use_start_flag = bool(self.get_parameter("use_StartFlag").value)
+        self.use_ttc = bool(self.get_parameter("use_ttc").value)
+        self.ttc_brake_topic = str(self.get_parameter("ttc_brake_topic").value)
+        self.ttc_brake_warn_topic = str(self.get_parameter("ttc_brake_warn_topic").value)
+        self.ttc_dir_topic = str(self.get_parameter("ttc_dir_topic").value)
+        self.ttc_turn_boost = abs(float(self.get_parameter("ttc_turn_boost").value))
+        self.pub_debug = bool(self.get_parameter("pub_debug").value)
         self.pub_errs = bool(self.get_parameter("pub_errs").value)
         self.cross_track_error_topic = str(self.get_parameter("cross_track_error_topic").value)
         self.heading_error_topic = str(self.get_parameter("heading_error_topic").value)
@@ -85,6 +108,8 @@ class PurePursuitNode(Node):
 
         self.eps = float(self.get_parameter("eps").value)
         self.tf_timeout = float(self.get_parameter("tf_timeout_sec").value)
+        self.max_omega_ttc = max(float(self.get_parameter("max_omega_ttc").value), self.max_omega)
+        self.v_adapt_max = max(self.v_min, min(self.v_max, self.max_speed))
 
         # ---- ROS interfaces
         self.cmd_pub = self.create_publisher(TwistStamped, self.cmd_topic, 10)
@@ -119,6 +144,35 @@ class PurePursuitNode(Node):
         else:
             self.get_logger().info("Error publishers disabled.")
 
+        # TTC-assisted turning state
+        self.ttc_brake_active = False
+        self.ttc_brake_warn_active = False
+        self.ttc_obstacle_dir = 3  # 0:right obstacle, 1:left obstacle, 3:indeterminate
+        if self.use_ttc:
+            self.ttc_brake_sub = self.create_subscription(
+                Bool,
+                self.ttc_brake_topic,
+                self.ttc_brake_callback,
+                10,
+            )
+            self.ttc_dir_sub = self.create_subscription(
+                Int32,
+                self.ttc_dir_topic,
+                self.ttc_dir_callback,
+                10,
+            )
+            self.ttc_brake_warn_sub = self.create_subscription(
+                Bool,
+                self.ttc_brake_warn_topic,
+                self.ttc_brake_warn_callback,
+                10,
+            )
+            self.get_logger().info(
+                f"TTC assist enabled (brake: {self.ttc_brake_topic}, dir: {self.ttc_dir_topic})."
+            )
+        else:
+            self.get_logger().info("TTC assist disabled.")
+
         self.start_flag = not self.use_start_flag
         if self.use_start_flag:
             self.get_logger().info("Start flag mode enabled. Waiting for /start signal to begin.")
@@ -140,18 +194,53 @@ class PurePursuitNode(Node):
         self.path_frame: Optional[str] = None
         self.has_path = False
         self.last_target_index = 0  # progressing index
+        self.first_run = True
+        if self.use_adaptative_v:
+            self.prev_v_cmd = 0.0
+        else:
+            self.prev_v_cmd = clamp(self.v_nominal, 0.0, self.max_speed)
 
         # ---- Timer
         dt = 1.0 / max(self.rate_hz, 1.0)
         self.timer = self.create_timer(dt, self.on_timer)
 
         self.get_logger().info(f"Pure Pursuit listening on {self.path_topic}, publishing {self.cmd_topic}")
+        self.get_logger().info(
+            f"Adaptive speed: {self.use_adaptative_v} "
+            f"(v_min={self.v_min:.2f}, v_max={self.v_adapt_max:.2f}, kv_heading={self.kv_heading:.2f}, "
+            f"alpha={self.v_smoothing_alpha:.2f})"
+        )
 
     def start_callback(self, msg: Bool) -> None:
         if msg.data:
             if not self.start_flag:
                 self.get_logger().info("Received start signal. Starting control.")
             self.start_flag = True
+
+    def ttc_brake_callback(self, msg: Bool) -> None:
+        if not self.first_run:
+            self.ttc_brake_active = bool(msg.data)
+        if self.pub_debug:
+            state = "ACTIVE" if self.ttc_brake_active else "INACTIVE"
+            self.get_logger().info(f"TTC brake state changed: {state}")
+
+    def ttc_brake_warn_callback(self, msg: Bool) -> None:
+        if not self.first_run:
+            self.ttc_brake_warn_active = bool(msg.data)
+        if self.pub_debug:
+            state = "ACTIVE" if self.ttc_brake_warn_active else "INACTIVE"
+            self.get_logger().info(f"TTC brake WARNING state changed: {state}")
+
+    def ttc_dir_callback(self, msg: Int32) -> None:
+        direction = int(msg.data)
+        if direction in (0, 1, 3):
+            self.ttc_obstacle_dir = direction
+        else:
+            self.ttc_obstacle_dir = 3
+
+        if self.pub_debug:
+            dir_str = {0: "RIGHT", 1: "LEFT", 3: "INDETERMINATE"}.get(self.ttc_obstacle_dir, "UNKNOWN")
+            self.get_logger().info(f"TTC obstacle direction updated: {dir_str} ({self.ttc_obstacle_dir})")
 
     def publish_error_signals(
         self,
@@ -176,6 +265,43 @@ class PurePursuitNode(Node):
             msg = Float64()
             msg.data = float(delta)
             self.delta_pub.publish(msg)
+
+    def apply_ttc_turn_assist(self, omega: float) -> float:
+        omega_base = clamp(omega, -self.max_omega, self.max_omega)
+        ttc_emergency = self.use_ttc and self.ttc_brake_active
+        ttc_warning = self.use_ttc and self.ttc_brake_warn_active and not ttc_emergency
+
+        # Apply assist for both emergency brake and warning levels.
+        if not (ttc_emergency or ttc_warning):
+            return omega_base
+
+        # Build an avoidance steering target, then blend with the Pure Pursuit command.
+        if self.ttc_obstacle_dir == 0:
+            # Obstacle on right -> steer left.
+            omega_avoid = abs(omega_base) + self.ttc_turn_boost
+            if self.pub_debug:
+                state = "brake" if ttc_emergency else "warning"
+                self.get_logger().info(
+                    f"TTC {state} active with right obstacle. Applying left turn assist."
+                )
+        elif self.ttc_obstacle_dir == 1:
+            # Obstacle on left -> steer right.
+            omega_avoid = -(abs(omega_base) + self.ttc_turn_boost)
+            if self.pub_debug:
+                state = "brake" if ttc_emergency else "warning"
+                self.get_logger().info(
+                    f"TTC {state} active with left obstacle. Applying right turn assist."
+                )
+        else:
+            # Unknown side: keep Pure Pursuit steering to avoid spinning on stale direction info.
+            return omega_base
+
+        if ttc_warning:
+            # Warning mode should still steer away, but less aggressively than full brake mode.
+            omega_avoid *= 0.5
+
+        omega_avoid = clamp(omega_avoid, -self.max_omega_ttc, self.max_omega_ttc)
+        return omega_avoid
 
     def on_path(self, msg: Path) -> None:
         self.path = list(msg.poses)
@@ -227,11 +353,15 @@ class PurePursuitNode(Node):
                 )
                 self.start_flag = False
             self.publish_stop()
+            self.first_run = True
             return
 
         # 3) Compute lookahead (optionally speed-adaptive)
-        v_cmd = clamp(self.v_nominal, 0.0, self.max_speed)
-        Ld = clamp(self.L0 + self.kv * abs(v_cmd), self.Lmin, self.Lmax)
+        if self.use_adaptative_v:
+            v_for_lookahead = clamp(self.prev_v_cmd, self.v_min, self.v_adapt_max)
+        else:
+            v_for_lookahead = clamp(self.v_nominal, 0.0, self.max_speed)
+        Ld = clamp(self.L0 + self.kv * abs(v_for_lookahead), self.Lmin, self.Lmax)
 
         # 4) Select target point in base_link frame
         target = self.find_lookahead_target(tf, Ld)
@@ -246,13 +376,27 @@ class PurePursuitNode(Node):
         # 5) Pure Pursuit curvature and angular velocity
         # kappa = 2*by / Ld^2
         heading_error = math.atan2(by, bx)
+        if self.use_adaptative_v:
+            v_target = self.v_min + (self.v_adapt_max - self.v_min) * math.exp(
+                -self.kv_heading * abs(heading_error)
+            )
+            v_target = clamp(v_target, self.v_min, self.v_adapt_max)
+            v_cmd = (1.0 - self.v_smoothing_alpha) * self.prev_v_cmd + self.v_smoothing_alpha * v_target
+            v_cmd = clamp(v_cmd, self.v_min, self.v_adapt_max)
+        else:
+            v_cmd = clamp(self.v_nominal, 0.0, self.max_speed)
+
         cross_track_error = by
         kappa = (2.0 * by) / (Ld * Ld + self.eps)
         self.publish_error_signals(cross_track_error, heading_error, kappa)
         omega = v_cmd * kappa
+        omega = self.apply_ttc_turn_assist(omega)
 
         # Clamp omega
-        omega = clamp(omega, -self.max_omega, self.max_omega)
+        omega_limit = self.max_omega
+        if self.use_ttc and (self.ttc_brake_active or self.ttc_brake_warn_active):
+            omega_limit = self.max_omega_ttc
+        omega = clamp(omega, -omega_limit, omega_limit)
 
         # 6) Publish cmd_vel
         cmd = TwistStamped()
@@ -260,6 +404,8 @@ class PurePursuitNode(Node):
         cmd.twist.linear.x = float(v_cmd)
         cmd.twist.angular.z = float(omega)
         self.cmd_pub.publish(cmd)
+        self.prev_v_cmd = float(v_cmd)
+        self.first_run = False
 
 
     def transform_pose_to_base(self, pose_st, tf):
@@ -307,6 +453,8 @@ class PurePursuitNode(Node):
         return best_fallback
 
     def publish_stop(self) -> None:
+        self.prev_v_cmd = 0.0
+
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.twist.linear.x = 0.0
