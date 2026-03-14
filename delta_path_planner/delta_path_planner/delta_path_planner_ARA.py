@@ -21,7 +21,7 @@ import tf2_ros
 from dataclasses import dataclass
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Bool
 
 @dataclass
 class ARANode:
@@ -50,6 +50,7 @@ class ARAPlannerNode(Node):
         self.declare_parameter('topics.goal_topic', '/goal_pose')
         self.declare_parameter('topics.path_topic', '/ara_path')
         self.use_waypoints = self.declare_parameter('waypoints', False).value
+        self.use_start = self.declare_parameter('use_start', self.use_waypoints).value
 
         self.declare_parameter('frames.base_frame', 'base_link')
         self.declare_parameter('frames.global_frame', 'map')
@@ -102,6 +103,17 @@ class ARAPlannerNode(Node):
         self.path_pub = self.create_publisher(Path, path_topic, 10)
         self.debug_paths_pub = self.create_publisher(MarkerArray, debug_topic, 10)
 
+        self.start_flag = (not self.use_waypoints) or (not self.use_start)
+        self.pending_paths = []
+
+        if self.use_waypoints and self.use_start:
+            self.create_subscription(Bool, '/start', self.start_callback, 10)
+            self.get_logger().info(
+                'ARA start gate enabled. Planning runs immediately; path publication waits for /start.'
+            )
+        elif self.use_waypoints:
+            self.get_logger().info('ARA start gate disabled. Planned paths publish immediately.')
+
         qos_map = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -118,6 +130,7 @@ class ARAPlannerNode(Node):
         self._obstacles: Optional[np.ndarray] = None
         self._dist_cells: Optional[np.ndarray] = None
         self.waypoint_pairs = []
+        self.waypoints_pending_plan = False
         if self._debug_mode:
             self.get_logger().info("ARA* Planner Node Iniciado con los siguientes parÃ¡metros:" \
             f"- Epsilon Start: {self.get_parameter('ara_core.epsilon_start').get_parameter_value().double_value}" \
@@ -134,6 +147,36 @@ class ARAPlannerNode(Node):
     # =================================================================
     # CALLBACKS DE ROS 2
     # =================================================================
+    def start_callback(self, msg: Bool):
+        if not msg.data:
+            return
+        if not self.start_flag:
+            self.get_logger().info('Received /start signal. Releasing queued planned paths.')
+        self.start_flag = True
+        self._publish_pending_paths()
+
+    def _publish_pending_paths(self):
+        if not self.pending_paths:
+            return
+
+        queued_paths = self.pending_paths
+        self.pending_paths = []
+        self.get_logger().info(f'Publishing {len(queued_paths)} queued path message(s).')
+
+        for path_msg, log_msg in queued_paths:
+            self.path_pub.publish(path_msg)
+            self.get_logger().info(log_msg)
+
+    def _publish_or_queue_path(self, path_msg: Path, log_msg: str):
+        if self.start_flag:
+            self.path_pub.publish(path_msg)
+            self.get_logger().info(log_msg)
+        else:
+            self.pending_paths.append((path_msg, log_msg))
+            self.get_logger().info(
+                'Start signal not received yet. Planned path queued for publication.'
+            )
+
     def map_cb(self, msg: OccupancyGrid):
         """Recibe el mapa, lo infla como Best First y prepara obstaculos para ARA*."""
         self._map = msg
@@ -165,6 +208,10 @@ class ARAPlannerNode(Node):
         self.get_logger().info(
             f'Map received: {W}x{H}, res={res:.3f} m/px, inflation_cells={inflation_cells}'
         )
+
+        if self.use_waypoints and self.waypoints_pending_plan and self.waypoint_pairs:
+            self.get_logger().info('Map ready with pending waypoint plan. Planning waypoint paths now.')
+            self.plan_waypoint_paths()
 
     def make_inflation_mask(self, grid: np.ndarray, inflation_cells: int, occ_thresh: int) -> np.ndarray:
         """Devuelve mascara booleana (H,W) con inflacion tipo Best First."""
@@ -233,8 +280,7 @@ class ARAPlannerNode(Node):
 
         # 3. Publicar si se encontrÃ³ una ruta
         if path_msg is not None:
-            self.path_pub.publish(path_msg)
-            self.get_logger().info("Â¡Ruta ARA* publicada!")
+            self._publish_or_queue_path(path_msg, "Â¡Ruta ARA* publicada!")
         else:
             self.get_logger().error("ARA* fallÃ³ al encontrar una ruta.")
 
@@ -251,6 +297,7 @@ class ARAPlannerNode(Node):
             self.waypoint_pairs.append({'start': start, 'goal': goal})
 
         self.get_logger().info(f'Received {len(self.waypoint_pairs)} waypoint pairs')
+        self.waypoints_pending_plan = True
         self.plan_waypoint_paths()
 
     def plan_waypoint_paths(self):
@@ -277,10 +324,11 @@ class ARAPlannerNode(Node):
             self.get_logger().warn('No combined path could be generated from waypoint pairs')
             return
 
-        self.path_pub.publish(combined_path)
-        self.get_logger().info(
+        self._publish_or_queue_path(
+            combined_path,
             f'Published combined path with {len(combined_path.poses)} total poses'
         )
+        self.waypoints_pending_plan = False
 
     # =================================================================
     # 4. FUNCIONES AUXILIARES 

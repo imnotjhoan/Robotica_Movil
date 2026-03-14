@@ -13,6 +13,7 @@ def generate_launch_description():
 	use_sim_time = LaunchConfiguration("use_sim_time")
 	use_amcl = LaunchConfiguration("use_amcl")
 	use_waypoints = LaunchConfiguration("use_waypoints")
+	use_start = LaunchConfiguration("use_start")
 	planner_index = LaunchConfiguration("planner_index")
 	inflate_radius = LaunchConfiguration("inflate_radius")
 
@@ -50,6 +51,7 @@ def generate_launch_description():
 					{
 						"use_sim_time": use_sim_time,
 						"waypoints": use_waypoints,
+						"use_start": use_start,
 						"topics.path_topic": "/planned_path",
 						"geometry.inflate_radius": inflate_radius,
 					}
@@ -64,7 +66,7 @@ def generate_launch_description():
 		name="waypoints_node",
 		output="screen",
 		parameters=[{"use_sim_time": use_sim_time,
-			   "use_start": True,
+			   "use_start": False,
 			   "manual": True,
 			   "closed_loop": True,
 			   "num_points": 20,
@@ -119,6 +121,11 @@ def generate_launch_description():
 				"use_waypoints",
 				default_value="true",
 				description="If true planner listens to /waypoints_topic and launches waypoints_node.",
+			),
+			DeclareLaunchArgument(
+				"use_start",
+				default_value="true",
+				description="If true, planner publishes path only after /start in waypoint mode.",
 			),
 			DeclareLaunchArgument(
 				"inflate_radius",

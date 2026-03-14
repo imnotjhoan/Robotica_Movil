@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path
+from std_msgs.msg import Bool
 import tf2_ros
 from rclpy.qos import QoSProfile, DurabilityPolicy
 import tf_transformations
@@ -18,6 +19,7 @@ class DijkstraNode(Node):
         self.robot_radius_m = self.declare_parameter('robot_radius_m', 0.5).value
         self.safety_margin_m = self.declare_parameter('safety_margin_m', 0.05).value
         self.use_waypoints = self.declare_parameter('waypoints', False).value
+        self.use_start = self.declare_parameter('use_start', self.use_waypoints).value
 
         self.map_topic = self.declare_parameter('topics.map_topic', '/map').value
         self.goal_topic = self.declare_parameter('topics.goal_topic', '/goal_pose').value
@@ -39,6 +41,17 @@ class DijkstraNode(Node):
         # Publishers
         self.path_pub = self.create_publisher(Path, self.path_topic, 10)
 
+        self.start_flag = (not self.use_waypoints) or (not self.use_start)
+        self.pending_paths = []
+
+        if self.use_waypoints and self.use_start:
+            self.create_subscription(Bool, '/start', self.start_callback, 10)
+            self.get_logger().info(
+                'Dijkstra start gate enabled. Planning runs immediately; path publication waits for /start.'
+            )
+        elif self.use_waypoints:
+            self.get_logger().info('Dijkstra start gate disabled. Planned paths publish immediately.')
+
         # tf2 listener
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -47,7 +60,38 @@ class DijkstraNode(Node):
         self.map = None
         self.goal = None
         self.waypoint_pairs = []
+        self.waypoints_pending_plan = False
         self.get_logger().info('Dijkstra node initialized')
+
+    def start_callback(self, msg: Bool):
+        if not msg.data:
+            return
+        if not self.start_flag:
+            self.get_logger().info('Received /start signal. Releasing queued planned paths.')
+        self.start_flag = True
+        self._publish_pending_paths()
+
+    def _publish_pending_paths(self):
+        if not self.pending_paths:
+            return
+
+        queued_paths = self.pending_paths
+        self.pending_paths = []
+        self.get_logger().info(f'Publishing {len(queued_paths)} queued path message(s).')
+
+        for path_msg, log_msg in queued_paths:
+            self.path_pub.publish(path_msg)
+            self.get_logger().info(log_msg)
+
+    def _publish_or_queue_path(self, path_msg: Path, log_msg: str):
+        if self.start_flag:
+            self.path_pub.publish(path_msg)
+            self.get_logger().info(log_msg)
+        else:
+            self.pending_paths.append((path_msg, log_msg))
+            self.get_logger().info(
+                'Start signal not received yet. Planned path queued for publication.'
+            )
 
     def map_callback(self, msg):
         self.map = msg
@@ -66,6 +110,10 @@ class DijkstraNode(Node):
         self.map.data = data.flatten().tolist()
         
         self.get_logger().info('Map received')
+
+        if self.use_waypoints and self.waypoints_pending_plan and self.waypoint_pairs:
+            self.get_logger().info('Map ready with pending waypoint plan. Planning waypoint paths now.')
+            self.plan_waypoint_paths()
 		
     def make_inflation_mask(self, occ_grid, inflation_cells: int, occ_thresh: int):
         """Return boolean mask (h,w): True where cells are within `inflation_cells` of any obstacle."""
@@ -115,6 +163,7 @@ class DijkstraNode(Node):
             self.waypoint_pairs.append({'start': start, 'goal': goal})
         
         self.get_logger().info(f'Received {len(self.waypoint_pairs)} waypoint pairs')
+        self.waypoints_pending_plan = True
         self.plan_waypoint_paths()
 
     def plan_waypoint_paths(self):
@@ -143,9 +192,11 @@ class DijkstraNode(Node):
             
             self.get_logger().info(f'Waypoint pair {i} path calculated (length: {len(path)})')
         
-        # Publish all paths as a single message
-        self.path_pub.publish(combined_path)
-        self.get_logger().info(f'Published combined path with {len(combined_path.poses)} total poses')
+        self._publish_or_queue_path(
+            combined_path,
+            f'Published combined path with {len(combined_path.poses)} total poses'
+        )
+        self.waypoints_pending_plan = False
 		
     def plan_path(self):
         self.get_logger().info('Planning path...')
@@ -180,8 +231,7 @@ class DijkstraNode(Node):
             ros_path.poses.append(pose)
         
 
-        self.path_pub.publish(ros_path)
-        self.get_logger().info('Path published')
+        self._publish_or_queue_path(ros_path, 'Path published')
     
     def world_to_grid(self, pos):
         mx = int((pos.x - self.map.info.origin.position.x) / self.map.info.resolution)
