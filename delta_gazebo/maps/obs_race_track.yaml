@@ -1,0 +1,7 @@
+image: obs_race_track.pgm
+mode: trinary
+resolution: 0.050
+origin: [-14.941, -38.461, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
