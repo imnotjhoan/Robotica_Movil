@@ -50,6 +50,10 @@ class PurePursuitNode(Node):
         self.declare_parameter("goal_tolerance", 0.25)      # m
         self.declare_parameter("use_StartFlag", True)
         self.declare_parameter("use_ttc", True)
+        self.declare_parameter("use_narrow_section_speed_reduction", True)
+        self.declare_parameter("narrow_section_topic", "/narrow_section_active")
+        self.declare_parameter("narrow_speed_factor", 0.55)
+        self.declare_parameter("narrow_speed_min", 0.2)
         self.declare_parameter("ttc_brake_topic", "/brake_active")
         self.declare_parameter("ttc_brake_warn_topic", "/brake_warn")
         self.declare_parameter("ttc_dir_topic", "/dir_brake")
@@ -91,6 +95,16 @@ class PurePursuitNode(Node):
         self.goal_tol = float(self.get_parameter("goal_tolerance").value)
         self.use_start_flag = bool(self.get_parameter("use_StartFlag").value)
         self.use_ttc = bool(self.get_parameter("use_ttc").value)
+        self.use_narrow_section_speed_reduction = bool(
+            self.get_parameter("use_narrow_section_speed_reduction").value
+        )
+        self.narrow_section_topic = str(self.get_parameter("narrow_section_topic").value)
+        self.narrow_speed_factor = clamp(
+            float(self.get_parameter("narrow_speed_factor").value),
+            0.0,
+            1.0,
+        )
+        self.narrow_speed_min = max(float(self.get_parameter("narrow_speed_min").value), 0.0)
         self.ttc_brake_topic = str(self.get_parameter("ttc_brake_topic").value)
         self.ttc_brake_warn_topic = str(self.get_parameter("ttc_brake_warn_topic").value)
         self.ttc_dir_topic = str(self.get_parameter("ttc_dir_topic").value)
@@ -173,6 +187,22 @@ class PurePursuitNode(Node):
         else:
             self.get_logger().info("TTC assist disabled.")
 
+        self.narrow_section_active = False
+        if self.use_narrow_section_speed_reduction:
+            self.narrow_section_sub = self.create_subscription(
+                Bool,
+                self.narrow_section_topic,
+                self.narrow_section_callback,
+                10,
+            )
+            self.get_logger().info(
+                "Narrow-section speed reduction enabled "
+                f"(topic: {self.narrow_section_topic}, factor: {self.narrow_speed_factor:.2f}, "
+                f"min: {self.narrow_speed_min:.2f})."
+            )
+        else:
+            self.get_logger().info("Narrow-section speed reduction disabled.")
+
         self.start_flag = not self.use_start_flag
         if self.use_start_flag:
             self.get_logger().info("Start flag mode enabled. Waiting for /start signal to begin.")
@@ -241,6 +271,28 @@ class PurePursuitNode(Node):
         if self.pub_debug:
             dir_str = {0: "RIGHT", 1: "LEFT", 3: "INDETERMINATE"}.get(self.ttc_obstacle_dir, "UNKNOWN")
             self.get_logger().info(f"TTC obstacle direction updated: {dir_str} ({self.ttc_obstacle_dir})")
+
+    def narrow_section_callback(self, msg: Bool) -> None:
+        new_state = bool(msg.data)
+        if new_state == self.narrow_section_active:
+            return
+
+        self.narrow_section_active = new_state
+        if self.pub_debug:
+            if self.narrow_section_active:
+                self.get_logger().warn("Narrow-section mode ACTIVE: reducing forward speed.")
+            else:
+                self.get_logger().info("Narrow-section mode INACTIVE: restoring nominal speed policy.")
+
+    def apply_narrow_speed_reduction(self, speed_cmd: float, upper_bound: float) -> float:
+        speed_cmd = clamp(speed_cmd, 0.0, upper_bound)
+
+        if not self.use_narrow_section_speed_reduction or not self.narrow_section_active:
+            return speed_cmd
+
+        reduced_speed = speed_cmd * self.narrow_speed_factor
+        min_speed = min(self.narrow_speed_min, upper_bound)
+        return clamp(reduced_speed, min_speed, upper_bound)
 
     def publish_error_signals(
         self,
@@ -358,9 +410,11 @@ class PurePursuitNode(Node):
 
         # 3) Compute lookahead (optionally speed-adaptive)
         if self.use_adaptative_v:
-            v_for_lookahead = clamp(self.prev_v_cmd, self.v_min, self.v_adapt_max)
+            v_for_lookahead = clamp(self.prev_v_cmd, 0.0, self.v_adapt_max)
+            v_for_lookahead = self.apply_narrow_speed_reduction(v_for_lookahead, self.v_adapt_max)
         else:
             v_for_lookahead = clamp(self.v_nominal, 0.0, self.max_speed)
+            v_for_lookahead = self.apply_narrow_speed_reduction(v_for_lookahead, self.max_speed)
         Ld = clamp(self.L0 + self.kv * abs(v_for_lookahead), self.Lmin, self.Lmax)
 
         # 4) Select target point in base_link frame
@@ -383,8 +437,10 @@ class PurePursuitNode(Node):
             v_target = clamp(v_target, self.v_min, self.v_adapt_max)
             v_cmd = (1.0 - self.v_smoothing_alpha) * self.prev_v_cmd + self.v_smoothing_alpha * v_target
             v_cmd = clamp(v_cmd, self.v_min, self.v_adapt_max)
+            v_cmd = self.apply_narrow_speed_reduction(v_cmd, self.v_adapt_max)
         else:
             v_cmd = clamp(self.v_nominal, 0.0, self.max_speed)
+            v_cmd = self.apply_narrow_speed_reduction(v_cmd, self.max_speed)
 
         cross_track_error = by
         kappa = (2.0 * by) / (Ld * Ld + self.eps)

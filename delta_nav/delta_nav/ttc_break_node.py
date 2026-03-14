@@ -23,6 +23,20 @@ class TTCBreakNode(Node):
         self.declare_parameter('max_range', 12.0)               # meters - ignore measurements farther than this
         self.declare_parameter("safety_bubble", True)           # If true, consider all measurements within min_distance_threshold as braking threats regardless of TTC
         self.declare_parameter("heartbeat_rate_hz", 1.0)
+        self.declare_parameter("enable_narrow_section_detection", True)
+        self.declare_parameter("narrow_section_topic", "/narrow_section_active")
+        self.declare_parameter("narrow_side_angle_window", 20.0)   # degrees around +/-90 used to sense side walls
+        self.declare_parameter("narrow_corridor_width_threshold", 1.5)  # meters - activate if left+right width <= this
+        self.declare_parameter("narrow_corridor_width_clear_threshold", 1.7)  # meters - clear hysteresis threshold
+        self.declare_parameter("narrow_min_points_per_side", 3)   # min valid side-wall points on each side
+
+        # Legacy narrow-section params (kept for backwards compatibility in existing YAML files).
+        self.declare_parameter("narrow_angle_range", 25.0)
+        self.declare_parameter("narrow_distance_threshold", 0.85)
+        self.declare_parameter("narrow_min_points", 10)
+        self.declare_parameter("narrow_ratio_activate", 0.50)
+        self.declare_parameter("narrow_ratio_clear", 0.35)
+        self.declare_parameter("narrow_hold_sec", 0.6)          # keep active for this time after last positive detection
 
 
         self.publish_rate = float(self.get_parameter('publish_rate').value)
@@ -34,6 +48,27 @@ class TTCBreakNode(Node):
         self.max_range = float(self.get_parameter('max_range').value)
         self.safety_bubble = bool(self.get_parameter('safety_bubble').value)
         self.heartbeat_rate_hz = float(self.get_parameter('heartbeat_rate_hz').value)
+        self.enable_narrow_section_detection = bool(self.get_parameter('enable_narrow_section_detection').value)
+        self.narrow_section_topic = str(self.get_parameter('narrow_section_topic').value)
+        self.narrow_side_angle_window = max(float(self.get_parameter('narrow_side_angle_window').value), 0.0)
+        self.narrow_corridor_width_threshold = max(
+            float(self.get_parameter('narrow_corridor_width_threshold').value),
+            0.0,
+        )
+        self.narrow_corridor_width_clear_threshold = max(
+            float(self.get_parameter('narrow_corridor_width_clear_threshold').value),
+            self.narrow_corridor_width_threshold,
+        )
+        self.narrow_min_points_per_side = max(int(self.get_parameter('narrow_min_points_per_side').value), 1)
+
+        # Legacy params are still read to avoid surprises when users keep old YAML entries.
+        self.narrow_angle_range = max(float(self.get_parameter('narrow_angle_range').value), 0.0)
+        self.narrow_distance_threshold = max(float(self.get_parameter('narrow_distance_threshold').value), 0.0)
+        self.narrow_min_points = max(int(self.get_parameter('narrow_min_points').value), 1)
+        self.narrow_ratio_activate = max(float(self.get_parameter('narrow_ratio_activate').value), 0.0)
+        self.narrow_ratio_clear = max(float(self.get_parameter('narrow_ratio_clear').value), 0.0)
+        self.narrow_hold_sec = max(float(self.get_parameter('narrow_hold_sec').value), 0.0)
+
         # ---- State ----
         self.current_cmd_vel = TwistStamped()    # Last received command velocity
         self.last_laser_scan = None              # Last received laser scan
@@ -43,6 +78,9 @@ class TTCBreakNode(Node):
         self.brake_trigger_angle = None          # Angle of the measurement that triggered brake
         self.is_stopped = None                   # Last published /brake_active state
         self.is_warned = None                    # Last published /brake_warn state
+        self.narrow_section_active = None
+        self.last_narrow_positive_time = self.get_clock().now().nanoseconds * 1e-9
+        self.last_narrow_corridor_width = float('inf')
         
         # ---- Pub/Sub ----
         # QoS profile compatible with sensor publishers (RELIABLE, VOLATILE)
@@ -65,6 +103,7 @@ class TTCBreakNode(Node):
         self.brake_pub = self.create_publisher(Bool, '/brake_active', 10)
         # Publisher for brake direction (0=right, 1=left, 3=indeterminate)
         self.dir_brake_pub = self.create_publisher(Int32, '/dir_brake', 10)
+        self.narrow_section_pub = self.create_publisher(Bool, self.narrow_section_topic, 10)
 
         if self.safety_bubble:
             self.brake_warn_pub = self.create_publisher(Bool, '/brake_warn', 10)
@@ -127,6 +166,107 @@ class TTCBreakNode(Node):
         brake_msg.data = warn_state
         self.brake_warn_pub.publish(brake_msg)
         self.is_warned = warn_state
+
+    def _publish_narrow_state_if_changed(self, narrow_state: bool):
+        """Publish /narrow_section_active only on transitions."""
+        if self.narrow_section_active == narrow_state:
+            return
+
+        msg = Bool()
+        msg.data = narrow_state
+        self.narrow_section_pub.publish(msg)
+        self.narrow_section_active = narrow_state
+
+        if narrow_state:
+            if math.isfinite(self.last_narrow_corridor_width):
+                self.get_logger().warn(
+                    "NARROW SECTION detected. "
+                    f"Estimated corridor width={self.last_narrow_corridor_width:.2f}m "
+                    f"<= {self.narrow_corridor_width_threshold:.2f}m."
+                )
+            else:
+                self.get_logger().warn("NARROW SECTION detected. Publishing speed-reduction hint.")
+        else:
+            if math.isfinite(self.last_narrow_corridor_width):
+                self.get_logger().info(
+                    "NARROW SECTION cleared. "
+                    f"Estimated corridor width={self.last_narrow_corridor_width:.2f}m "
+                    f">= {self.narrow_corridor_width_clear_threshold:.2f}m."
+                )
+            else:
+                self.get_logger().info("NARROW SECTION cleared.")
+
+    def _min_side_distance(self, values):
+        """Robust side-wall distance estimate from the smallest few lateral samples."""
+        if not values:
+            return float('inf')
+
+        ordered = sorted(values)
+        k = min(3, len(ordered))
+        return sum(ordered[:k]) / float(k)
+
+    def _detect_narrow_section(self, scan_msg: LaserScan) -> bool:
+        """
+        Detect narrow sections from side-wall corridor width with hysteresis and hold time.
+        """
+        if not self.enable_narrow_section_detection:
+            return False
+
+        side_window_rad = math.radians(self.narrow_side_angle_window)
+        left_samples = []
+        right_samples = []
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+
+        for i, range_val in enumerate(scan_msg.ranges):
+            if not math.isfinite(range_val):
+                continue
+            if range_val < self.min_range or range_val > self.max_range:
+                continue
+
+            angle = scan_msg.angle_min + i * scan_msg.angle_increment
+            while angle > math.pi:
+                angle -= 2 * math.pi
+            while angle < -math.pi:
+                angle += 2 * math.pi
+
+            # Convert to lateral distance from robot centerline.
+            lateral = abs(range_val * math.sin(angle))
+
+            # Side-wall windows centered at +/- 90 deg.
+            if abs(angle - (math.pi / 2.0)) <= side_window_rad:
+                left_samples.append(lateral)
+            elif abs(angle + (math.pi / 2.0)) <= side_window_rad:
+                right_samples.append(lateral)
+
+        is_active = bool(self.narrow_section_active)
+        if (
+            len(left_samples) < self.narrow_min_points_per_side
+            or len(right_samples) < self.narrow_min_points_per_side
+        ):
+            self.last_narrow_corridor_width = float('inf')
+            if is_active and (now_sec - self.last_narrow_positive_time) < self.narrow_hold_sec:
+                return True
+            return False
+
+        left_dist = self._min_side_distance(left_samples)
+        right_dist = self._min_side_distance(right_samples)
+        corridor_width = left_dist + right_dist
+        self.last_narrow_corridor_width = corridor_width
+
+        activate = corridor_width <= self.narrow_corridor_width_threshold
+        clear = corridor_width >= self.narrow_corridor_width_clear_threshold
+
+        if activate:
+            self.last_narrow_positive_time = now_sec
+            return True
+
+        if is_active:
+            if (now_sec - self.last_narrow_positive_time) < self.narrow_hold_sec:
+                return True
+            if not clear:
+                return True
+
+        return False
     
     def _calculate_ttc_for_measurement(self, range_val: float, angle: float, 
                                         cmd_linear_x: float) -> float:
@@ -267,6 +407,9 @@ class TTCBreakNode(Node):
         # Early exit if no recent laser scan data
         if self.last_laser_scan is None:
             return
+
+        narrow_active = self._detect_narrow_section(scan_msg)
+        self._publish_narrow_state_if_changed(narrow_active)
         
         # Reset minimum TTC for this cycle
         self.min_ttc = float('inf')
