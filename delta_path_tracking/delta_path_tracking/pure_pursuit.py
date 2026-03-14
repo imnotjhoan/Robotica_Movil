@@ -30,24 +30,22 @@ class PurePursuitNode(Node):
 
     def __init__(self):
         super().__init__("pure_pursuit_node")
-        planners = ['/best_first_path', '/dijkstra_path']
-
         # ---- Parameters
-        self.declare_parameter("path_topic", planners[0])
+        self.declare_parameter("path_topic", "/planned_path")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
 
         self.declare_parameter("base_frame", "base_link")
 
         # Control
         self.declare_parameter("control_rate_hz", 20.0)
-        self.declare_parameter("v_nominal", 0.5)           # m/s
-        self.declare_parameter("max_speed", 1.0)            # m/s
+        self.declare_parameter("v_nominal", 4.5)           # m/s
+        self.declare_parameter("max_speed", 10.0)            # m/s
         self.declare_parameter("max_omega", 1.5)            # rad/s
         self.declare_parameter("goal_tolerance", 0.25)      # m
 
         # Lookahead: Ld = clamp(L0 + k*v, Lmin, Lmax)
         self.declare_parameter("lookahead_L0", 0.6)         # m
-        self.declare_parameter("lookahead_kv", 0.0)         # s  (0 disables adaptation)
+        self.declare_parameter("lookahead_kv", 0.5)         # s  (0 disables adaptation)
         self.declare_parameter("lookahead_min", 0.4)        # m
         self.declare_parameter("lookahead_max", 2.0)        # m
 
