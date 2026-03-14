@@ -44,19 +44,19 @@ class StanleyNode(Node):
 
         # Control
         self.declare_parameter("control_rate_hz", 10.0)
-        self.declare_parameter("v_nominal", 1.0)      # m/s
+        self.declare_parameter("v_nominal", 3.5)      # m/s
         self.declare_parameter("v_min", 0.2)
-        self.declare_parameter("v_max", 5.0)
-        self.declare_parameter("kv1", 1.5)             # Speed proportional gain for dynamic velocity scaling based on cross-track error
-        self.declare_parameter("kv2", 2.0)             # Speed proportional gain for dynamic velocity scaling based on heading error
+        self.declare_parameter("v_max", 4.5)
+        self.declare_parameter("kv1", 0.8)             # Speed proportional gain for dynamic velocity scaling based on cross-track error
+        self.declare_parameter("kv2", 1.5)             # Speed proportional gain for dynamic velocity scaling based on heading error
         self.declare_parameter("max_omega", 1.5)      # rad/s
         self.declare_parameter("goal_tolerance", 0.45)
 
         self.declare_parameter("adaptative_v", True)
 
         # Stanley control parameters
-        self.declare_parameter("stanley_k", 2.0)
-        self.declare_parameter("velocity_softening", 0.1)
+        self.declare_parameter("stanley_k", 0.8)
+        self.declare_parameter("velocity_softening", 0.6)
         self.declare_parameter("use_StartFlag", True)
         self.declare_parameter("use_ttc", True)
         self.declare_parameter("ttc_brake_topic", "/brake_active")
@@ -196,6 +196,7 @@ class StanleyNode(Node):
         self.has_path = False
         self.last_closest_index = 0
         self.first_run = True
+        self.prev_omega = 0.0
 
         # ---- Timer
         dt = 1.0 / self.rate_hz
@@ -389,20 +390,23 @@ class StanleyNode(Node):
             )
         else:
             v_cmd = self.v_nominal
-        denom = max(abs(v_cmd), self.v_soft, self.eps)
+        denom = max(abs(v_cmd) + self.v_soft, self.eps)
         delta = heading_error + math.atan2(
             self.k_stanley * cross_track_error,
             denom,
         )
         self.publish_error_signals(cross_track_error, heading_error, delta)
         delta = wrap_to_pi(delta)
-        omega = self.apply_ttc_turn_assist(delta)
+        omega = v_cmd * math.tan(self.apply_ttc_turn_assist(delta)) / 0.2
+        omega = 0.7 * self.prev_omega + 0.3 * omega
+        omega = clamp(omega, -self.max_omega, self.max_omega)
+
 
         # 5) Publish cmd_vel
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.twist.linear.x = float(v_cmd)
-        cmd.twist.angular.z = float(omega)
+        cmd.twist.angular.z = omega
         self.cmd_pub.publish(cmd)
 
         self.first_run = False
@@ -453,7 +457,7 @@ class StanleyNode(Node):
         heading_error = wrap_to_pi(math.atan2(dy, dx))
 
         # Signed distance from robot origin to path segment line (left is positive with 'y' as the divider).
-        cross_track_error = (dx * y0 - dy * x0) / seg_norm
+        cross_track_error = (dx * y0 - dy * (x0 - 0.2)) / seg_norm
         return heading_error, cross_track_error
 
     def compute_stanley_errors(self, tf) -> Optional[Tuple[float, float, int]]:
@@ -462,7 +466,7 @@ class StanleyNode(Node):
         Returns (heading_error, cross_track_error, closest_index).
         """
         n = len(self.path)
-        start = min(max(self.last_closest_index, 0), n - 1)
+        start = min(max(self.last_closest_index - 5, 0), n - 1)
 
         cache: Dict[int, Tuple[float, float]] = {}
         closest_idx: Optional[int] = None
@@ -483,12 +487,12 @@ class StanleyNode(Node):
             return None
 
         if closest_idx < n - 1:
-            if closest_idx - 10 > 0:
-                p0 = self._get_transformed_xy(closest_idx - 10, tf, cache)
+            if closest_idx - 5 > 0:
+                p0 = self._get_transformed_xy(closest_idx - 5, tf, cache)
             else:
                 p0 = self._get_transformed_xy(closest_idx, tf, cache)
-            if closest_idx + 10 < n:
-                p1 = self._get_transformed_xy(closest_idx + 10, tf, cache)
+            if closest_idx + 15 < n:
+                p1 = self._get_transformed_xy(closest_idx + 15, tf, cache)
             else:
                 p1 = self._get_transformed_xy(closest_idx, tf, cache)
             if p0 is not None and p1 is not None:

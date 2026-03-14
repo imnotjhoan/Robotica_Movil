@@ -19,7 +19,7 @@ class TTCBreakNode(Node):
         self.declare_parameter('min_distance_threshold', 0.6)   # meters - minimum distance to obstacle for braking
         self.declare_parameter('forward_angle_range', 15.0)     # degrees - angle range in front of robot to consider
         self.declare_parameter('rear_angle_range', 10.0)        # degrees - angle range at rear of robot to consider
-        self.declare_parameter('min_range', 0.1)                # meters - ignore measurements closer than this
+        self.declare_parameter('min_range', 0.01)                # meters - ignore measurements closer than this
         self.declare_parameter('max_range', 12.0)               # meters - ignore measurements farther than this
         self.declare_parameter("safety_bubble", True)           # If true, consider all measurements within min_distance_threshold as braking threats regardless of TTC
         self.declare_parameter("heartbeat_rate_hz", 1.0)

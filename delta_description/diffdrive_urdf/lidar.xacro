@@ -49,7 +49,7 @@
             </vertical> -->
         </scan>
         <range>
-            <min>0.12</min>
+            <min>0.01</min>
             <max>12.0</max>
         </range>
         </lidar>
