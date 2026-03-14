@@ -364,7 +364,7 @@ class TTCBreakNode(Node):
         # Publish safety-bubble warning only on state transitions.
         if self.safety_bubble:
             self._publish_warn_state_if_changed(bubble_warn_active)
-            if bubble_warn_active:
+            if bubble_warn_active and not self.should_brake:
                 dir_msg = Int32()
                 dir_msg.data = self._determine_brake_direction_ang(bubble_warn_angle)
                 self.dir_brake_pub.publish(dir_msg)
@@ -400,9 +400,10 @@ class TTCBreakNode(Node):
         self._publish_brake_state_if_changed(self.should_brake)
         
         # Publish brake direction
-        dir_msg = Int32()
-        dir_msg.data = self._determine_brake_direction()
-        self.dir_brake_pub.publish(dir_msg)
+        if self.should_brake:
+            dir_msg = Int32()
+            dir_msg.data = self._determine_brake_direction()
+            self.dir_brake_pub.publish(dir_msg)
 
         # Log state changes
         if self.should_brake != was_braking:

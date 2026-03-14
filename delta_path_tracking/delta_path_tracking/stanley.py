@@ -43,7 +43,7 @@ class StanleyNode(Node):
         self.declare_parameter("base_frame", "base_link")
 
         # Control
-        self.declare_parameter("control_rate_hz", 50.0)
+        self.declare_parameter("control_rate_hz", 10.0)
         self.declare_parameter("v_nominal", 1.0)      # m/s (kept constant)
         self.declare_parameter("max_omega", 1.5)      # rad/s
         self.declare_parameter("goal_tolerance", 0.25)
@@ -221,6 +221,10 @@ class StanleyNode(Node):
             self.ttc_obstacle_dir = direction
         else:
             self.ttc_obstacle_dir = 3
+
+        if self.pub_debug:
+            dir_str = {0: "RIGHT", 1: "LEFT", 3: "INDETERMINATE"}.get(self.ttc_obstacle_dir, "UNKNOWN")
+            self.get_logger().info(f"TTC obstacle direction updated: {dir_str} ({self.ttc_obstacle_dir})")
 
     def publish_error_signals(
         self,
@@ -455,12 +459,12 @@ class StanleyNode(Node):
             return None
 
         if closest_idx < n - 1:
-            if closest_idx - 5 > 0:
-                p0 = self._get_transformed_xy(closest_idx - 5, tf, cache)
+            if closest_idx - 10 > 0:
+                p0 = self._get_transformed_xy(closest_idx - 10, tf, cache)
             else:
                 p0 = self._get_transformed_xy(closest_idx, tf, cache)
-            if closest_idx + 5 < n:
-                p1 = self._get_transformed_xy(closest_idx + 5, tf, cache)
+            if closest_idx + 10 < n:
+                p1 = self._get_transformed_xy(closest_idx + 10, tf, cache)
             else:
                 p1 = self._get_transformed_xy(closest_idx, tf, cache)
             if p0 is not None and p1 is not None:
