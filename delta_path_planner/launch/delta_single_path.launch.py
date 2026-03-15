@@ -50,6 +50,7 @@ def generate_launch_description():
 						"use_sim_time": use_sim_time,
 						"waypoints": use_waypoints,
 						"topics.path_topic": "/planned_path",
+						"geometry.inflate_radius": 0.65,
 					}
 				],
 				condition=IfCondition(EqualsSubstitution(planner_index, str(idx))),
@@ -63,8 +64,10 @@ def generate_launch_description():
 		output="screen",
 		parameters=[{"use_sim_time": use_sim_time,
 			   "use_start": True,
-			   "manual": False,
-			   "closed_loop": True}],
+			   "manual": True,
+			   "closed_loop": True,
+			   "num_points": 5,
+			   "waypoints_file": "/home/santy-estrada/mrad_ws_2601_delta/src/delta_path_planner/waypoints_json/sample_waypoints.json"}],
 		condition=IfCondition(use_waypoints),
 	)
 
@@ -103,7 +106,7 @@ def generate_launch_description():
 			),
 			DeclareLaunchArgument(
 				"use_amcl",
-				default_value="true",
+				default_value="false",
 				description="If true launch AMCL; otherwise launch SLAM localization.",
 			),
 			DeclareLaunchArgument(

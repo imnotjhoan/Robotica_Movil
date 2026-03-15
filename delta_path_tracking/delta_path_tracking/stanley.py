@@ -44,13 +44,19 @@ class StanleyNode(Node):
 
         # Control
         self.declare_parameter("control_rate_hz", 10.0)
-        self.declare_parameter("v_nominal", 1.0)      # m/s (kept constant)
+        self.declare_parameter("v_nominal", 3.5)      # m/s
+        self.declare_parameter("v_min", 0.2)
+        self.declare_parameter("v_max", 4.5)
+        self.declare_parameter("kv1", 0.8)             # Speed proportional gain for dynamic velocity scaling based on cross-track error
+        self.declare_parameter("kv2", 1.5)             # Speed proportional gain for dynamic velocity scaling based on heading error
         self.declare_parameter("max_omega", 1.5)      # rad/s
-        self.declare_parameter("goal_tolerance", 0.25)
+        self.declare_parameter("goal_tolerance", 0.45)
+
+        self.declare_parameter("adaptative_v", True)
 
         # Stanley control parameters
-        self.declare_parameter("stanley_k", 1.0)
-        self.declare_parameter("velocity_softening", 0.1)
+        self.declare_parameter("stanley_k", 0.8)
+        self.declare_parameter("velocity_softening", 0.6)
         self.declare_parameter("use_StartFlag", True)
         self.declare_parameter("use_ttc", True)
         self.declare_parameter("ttc_brake_topic", "/brake_active")
@@ -78,6 +84,11 @@ class StanleyNode(Node):
 
         self.rate_hz = max(float(self.get_parameter("control_rate_hz").value), 1.0)
         self.v_nominal = max(float(self.get_parameter("v_nominal").value), 0.0)
+        self.v_min = max(float(self.get_parameter("v_min").value), 0.0)
+        self.v_max = max(float(self.get_parameter("v_max").value), self.v_min)
+        self.kv1 = max(float(self.get_parameter("kv1").value), 0.0)
+        self.kv2 = max(float(self.get_parameter("kv2").value), 0.0)
+        self.use_adaptative_v = bool(self.get_parameter("adaptative_v").value)
         self.max_omega = float(self.get_parameter("max_omega").value)
         self.goal_tol = float(self.get_parameter("goal_tolerance").value)
 
@@ -185,6 +196,7 @@ class StanleyNode(Node):
         self.has_path = False
         self.last_closest_index = 0
         self.first_run = True
+        self.prev_omega = 0.0
 
         # ---- Timer
         dt = 1.0 / self.rate_hz
@@ -192,7 +204,8 @@ class StanleyNode(Node):
 
         self.get_logger().info(
             f"Stanley controller listening on {self.path_topic}, publishing {self.cmd_topic}, "
-            f"v={self.v_nominal:.2f} m/s, rate={self.rate_hz:.1f} Hz"
+            f"v={self.v_nominal:.2f} m/s, rate={self.rate_hz:.1f} Hz, "
+            f"adaptive_v={self.use_adaptative_v}"
         )
 
     def start_callback(self, msg: Bool):
@@ -282,7 +295,7 @@ class StanleyNode(Node):
 
         if ttc_warning:
             # Warning mode should still steer away, but less aggressively than full brake mode.
-            omega_avoid *= 0.9
+            omega_avoid *= 0.5
 
         omega_avoid = clamp(omega_avoid, -self.max_omega_ttc, self.max_omega_ttc)
 
@@ -338,7 +351,8 @@ class StanleyNode(Node):
             return
 
         goal_dist = math.hypot(goal_pose_b.pose.position.x, goal_pose_b.pose.position.y)
-        if goal_dist <= self.goal_tol:
+        n = len(self.path)
+        if goal_dist <= self.goal_tol and (n - self.last_closest_index <= 100):
             if self.use_start_flag and self.start_flag:
                 self.get_logger().info(
                     "Goal reached. Stopping and waiting for next /start signal."
@@ -364,21 +378,35 @@ class StanleyNode(Node):
         self.last_closest_index = idx
 
         # 4) Stanley control law: delta = heading_error + atan2(k * e_ct, v)
-        v_cmd = self.v_nominal
-        denom = max(abs(v_cmd), self.v_soft, self.eps)
+        if self.use_adaptative_v:
+            # Reduce speed when cross-track error is large to improve stability.
+            v_cmd = clamp(
+                self.v_min
+                + (self.v_max - self.v_min)
+                * math.exp(-self.kv1 * abs(cross_track_error))
+                * math.exp(-self.kv2 * abs(heading_error)),
+                self.v_min,
+                self.v_max,
+            )
+        else:
+            v_cmd = self.v_nominal
+        denom = max(abs(v_cmd) + self.v_soft, self.eps)
         delta = heading_error + math.atan2(
             self.k_stanley * cross_track_error,
             denom,
         )
         self.publish_error_signals(cross_track_error, heading_error, delta)
         delta = wrap_to_pi(delta)
-        omega = self.apply_ttc_turn_assist(delta)
+        omega = v_cmd * math.tan(self.apply_ttc_turn_assist(delta)) / 0.2
+        omega = 0.7 * self.prev_omega + 0.3 * omega
+        omega = clamp(omega, -self.max_omega, self.max_omega)
+
 
         # 5) Publish cmd_vel
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.twist.linear.x = float(v_cmd)
-        cmd.twist.angular.z = float(omega)
+        cmd.twist.angular.z = omega
         self.cmd_pub.publish(cmd)
 
         self.first_run = False
@@ -429,7 +457,7 @@ class StanleyNode(Node):
         heading_error = wrap_to_pi(math.atan2(dy, dx))
 
         # Signed distance from robot origin to path segment line (left is positive with 'y' as the divider).
-        cross_track_error = (dx * y0 - dy * x0) / seg_norm
+        cross_track_error = (dx * y0 - dy * (x0 - 0.2)) / seg_norm
         return heading_error, cross_track_error
 
     def compute_stanley_errors(self, tf) -> Optional[Tuple[float, float, int]]:
@@ -438,13 +466,13 @@ class StanleyNode(Node):
         Returns (heading_error, cross_track_error, closest_index).
         """
         n = len(self.path)
-        start = min(max(self.last_closest_index, 0), n - 1)
+        start = min(max(self.last_closest_index - 5, 0), n - 1)
 
         cache: Dict[int, Tuple[float, float]] = {}
         closest_idx: Optional[int] = None
         closest_dist_sq = float("inf")
 
-        for i in range(start, n):
+        for i in range(start, min(start + 100, n)):
             xy = self._get_transformed_xy(i, tf, cache)
             if xy is None:
                 continue
@@ -459,12 +487,12 @@ class StanleyNode(Node):
             return None
 
         if closest_idx < n - 1:
-            if closest_idx - 10 > 0:
-                p0 = self._get_transformed_xy(closest_idx - 10, tf, cache)
+            if closest_idx - 5 > 0:
+                p0 = self._get_transformed_xy(closest_idx - 5, tf, cache)
             else:
                 p0 = self._get_transformed_xy(closest_idx, tf, cache)
-            if closest_idx + 10 < n:
-                p1 = self._get_transformed_xy(closest_idx + 10, tf, cache)
+            if closest_idx + 15 < n:
+                p1 = self._get_transformed_xy(closest_idx + 15, tf, cache)
             else:
                 p1 = self._get_transformed_xy(closest_idx, tf, cache)
             if p0 is not None and p1 is not None:
