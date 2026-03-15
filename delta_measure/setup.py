@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'metrics_node = delta_measure.metrics_node:main',
+            'stanley_metrics_node = delta_measure.stanley_metrics_node:main',
         ],
     },
 )
