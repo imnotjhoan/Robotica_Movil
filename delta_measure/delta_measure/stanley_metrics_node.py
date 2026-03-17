@@ -27,7 +27,7 @@ class StanleyLogger(Node):
 
         self.declare_parameter(
             'output_dir',
-            '/home/jhoan/mrad_ws_2601_delta2/src/delta_measure/data_path_tracking'
+               '/home/jhoan/mrad_ws_2601_delta2/src/delta_measure/data_path_tracking'
         )
 
         self.declare_parameter('path_topic', '/planned_path')
