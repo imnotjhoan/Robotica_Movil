@@ -147,123 +147,123 @@ class MapMetricsLogger(Node):
         self.v_ref = msg.twist.linear.x       # ← TwistStamped necesita .twist.
         self.w_ref = msg.twist.angular.z
 
-    # def cmd_cb(self, msg: TwistStamped):
-    #     """Una muestra → una fila en el CSV."""
-    #     if not self.start_flag:
-    #         return
-    #     if self.start_time is None:
-    #         return  # aun no hay reloj sincronizado luego de /start
+    def cmd_cb(self, msg: TwistStamped):
+        """Una muestra → una fila en el CSV."""
+        if not self.start_flag:
+            return
+        if self.start_time is None:
+            return  # aun no hay reloj sincronizado luego de /start
 
-    #     cmd_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-    #     # Si el publisher no estampa, cae al ultimo /clock disponible.
-    #     sample_time = self.last_clock if cmd_stamp == 0.0 and self.last_clock is not None else cmd_stamp
-    #     if sample_time is None:
-    #         return
-
-    #     elapsed = sample_time - self.start_time
-    #     if elapsed < 0.0:
-    #         elapsed = 0.0
-
-    #     v = msg.twist.linear.x
-    #     w = msg.twist.angular.z
-
-    #     if self.latest_x is None or self.latest_y is None:
-    #         x = 0.0
-    #         y = 0.0
-    #         delta_distance = 0.0
-    #     else:
-    #         x = self.latest_x
-    #         y = self.latest_y
-    #         if self.prev_row_x is None or self.prev_row_y is None:
-    #             delta_distance = 0.0
-    #         else:
-    #             delta_distance = math.hypot(x - self.prev_row_x, y - self.prev_row_y)
-
-    #     # La distancia acumulada avanza exactamente con el salto entre puntos guardados en filas consecutivas.
-    #     self.total_distance += delta_distance
-
-    #     row = {
-    #         "row_type": "sample",
-    #         "timestamp_s": sample_time,
-    #         "elapsed_s": elapsed,
-    #         "v_real":      v,
-    #         "w_real":      w,
-    #         "brake":       self.pending_brake_events,
-    #         "x":           x,
-    #         "y":           y,
-    #         "distance_m":  self.total_distance,
-    #         "heading_error_rad": self.heading_error,
-    #         "cross_track_error_m": self.cross_track_error,
-    #         "controller_error": self.controller_error,
-    #         "path_index": None,
-    #         "path_x": None,
-    #         "path_y": None,
-    #     }
-
-    #     # Consume eventos de freno en el instante de escritura de la fila.
-    #     self.pending_brake_events = 0
-
-    #     if self.latest_x is not None and self.latest_y is not None:
-    #         self.prev_row_x = x
-    #         self.prev_row_y = y
-
-    #     self._writer.writerow(row)
-    #     self._csv_file.flush()
-
-    # # <-- New callback handling exact Gazebo Pose -->
-    # def pose_cb(self, msg: Pose):
-    #     self.latest_x = msg.position.x
-    #     self.latest_y = msg.position.y
-    
-    def pose_cb(self, msg: Pose):
-        self.latest_x = msg.position.x
-        self.latest_y = msg.position.y
-
-        # ── Igual que StanleyLogger: escribir aquí, no en cmd_cb ──
-        if not self.start_flag or self.start_time is None or self.last_clock is None:
+        cmd_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        # Si el publisher no estampa, cae al ultimo /clock disponible.
+        sample_time = self.last_clock if cmd_stamp == 0.0 and self.last_clock is not None else cmd_stamp
+        if sample_time is None:
             return
 
-        x = self.latest_x
-        y = self.latest_y
-        sample_time = self.last_clock
-        elapsed = max(0.0, sample_time - self.start_time)
+        elapsed = sample_time - self.start_time
+        if elapsed < 0.0:
+            elapsed = 0.0
 
-        if self.prev_row_x is None or self.prev_row_y is None:
+        v = msg.twist.linear.x
+        w = msg.twist.angular.z
+
+        if self.latest_x is None or self.latest_y is None:
+            x = 0.0
+            y = 0.0
             delta_distance = 0.0
         else:
-            delta_distance = math.hypot(x - self.prev_row_x, y - self.prev_row_y)
+            x = self.latest_x
+            y = self.latest_y
+            if self.prev_row_x is None or self.prev_row_y is None:
+                delta_distance = 0.0
+            else:
+                delta_distance = math.hypot(x - self.prev_row_x, y - self.prev_row_y)
 
+        # La distancia acumulada avanza exactamente con el salto entre puntos guardados en filas consecutivas.
         self.total_distance += delta_distance
-        self.prev_row_x = x
-        self.prev_row_y = y
 
         row = {
-            "row_type":             "sample",
-            "timestamp_s":          sample_time,
-            "elapsed_s":            elapsed,
-            "v_real":               self.v_real,   # ← último valor recibido de cmd_cb
-            "w_real":               self.w_real,
-            "brake":                self.pending_brake_events,
-            "x":                    x,
-            "y":                    y,
-            "distance_m":           self.total_distance,
-            "heading_error_rad":    self.heading_error,
-            "cross_track_error_m":  self.cross_track_error,
-            "controller_error":     self.controller_error,
-            "path_index":           None,
-            "path_x":               None,
-            "path_y":               None,
+            "row_type": "sample",
+            "timestamp_s": sample_time,
+            "elapsed_s": elapsed,
+            "v_real":      v,
+            "w_real":      w,
+            "brake":       self.pending_brake_events,
+            "x":           x,
+            "y":           y,
+            "distance_m":  self.total_distance,
+            "heading_error_rad": self.heading_error,
+            "cross_track_error_m": self.cross_track_error,
+            "controller_error": self.controller_error,
+            "path_index": None,
+            "path_x": None,
+            "path_y": None,
         }
 
+        # Consume eventos de freno en el instante de escritura de la fila.
         self.pending_brake_events = 0
+
+        if self.latest_x is not None and self.latest_y is not None:
+            self.prev_row_x = x
+            self.prev_row_y = y
+
         self._writer.writerow(row)
         self._csv_file.flush()
 
+    # <-- New callback handling exact Gazebo Pose -->
+    def pose_cb(self, msg: Pose):
+        self.latest_x = msg.position.x
+        self.latest_y = msg.position.y
+    
+    # def pose_cb(self, msg: Pose):
+    #     self.latest_x = msg.position.x
+    #     self.latest_y = msg.position.y
 
-    def cmd_cb(self, msg: TwistStamped):
-        """Solo almacena velocidades — la escritura ocurre en pose_cb."""
-        self.v_real = msg.twist.linear.x
-        self.w_real = msg.twist.angular.z
+    #     # ── Igual que StanleyLogger: escribir aquí, no en cmd_cb ──
+    #     if not self.start_flag or self.start_time is None or self.last_clock is None:
+    #         return
+
+    #     x = self.latest_x
+    #     y = self.latest_y
+    #     sample_time = self.last_clock
+    #     elapsed = max(0.0, sample_time - self.start_time)
+
+    #     if self.prev_row_x is None or self.prev_row_y is None:
+    #         delta_distance = 0.0
+    #     else:
+    #         delta_distance = math.hypot(x - self.prev_row_x, y - self.prev_row_y)
+
+    #     self.total_distance += delta_distance
+    #     self.prev_row_x = x
+    #     self.prev_row_y = y
+
+    #     row = {
+    #         "row_type":             "sample",
+    #         "timestamp_s":          sample_time,
+    #         "elapsed_s":            elapsed,
+    #         "v_real":               self.v_real,   # ← último valor recibido de cmd_cb
+    #         "w_real":               self.w_real,
+    #         "brake":                self.pending_brake_events,
+    #         "x":                    x,
+    #         "y":                    y,
+    #         "distance_m":           self.total_distance,
+    #         "heading_error_rad":    self.heading_error,
+    #         "cross_track_error_m":  self.cross_track_error,
+    #         "controller_error":     self.controller_error,
+    #         "path_index":           None,
+    #         "path_x":               None,
+    #         "path_y":               None,
+    #     }
+
+    #     self.pending_brake_events = 0
+    #     self._writer.writerow(row)
+    #     self._csv_file.flush()
+
+
+    # def cmd_cb(self, msg: TwistStamped):
+    #     """Solo almacena velocidades — la escritura ocurre en pose_cb."""
+    #     self.v_real = msg.twist.linear.x
+    #     self.w_real = msg.twist.angular.z
 
     def path_cb(self, msg: Path):
         if self.path_saved:
