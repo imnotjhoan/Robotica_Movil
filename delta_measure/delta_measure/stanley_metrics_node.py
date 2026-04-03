@@ -1,172 +1,271 @@
-# Stanley Metrics
+#!/usr/bin/env python3
+
 import os
 import csv
 import math
 import re
+
+
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
-from geometry_msgs.msg import TwistStamped, Pose  # <-- Added Pose
+
+from std_msgs.msg import Bool, Float64
+from nav_msgs.msg import Path
+from geometry_msgs.msg import Pose
 from rosgraph_msgs.msg import Clock
 
 
-FIELDNAMES = [
-    "timestamp_s",
-    "elapsed_s",
-    "v_real",        # velocidad lineal real  (/diffdrive_controller/cmd_vel)
-    "w_real",        # velocidad angular real
-    "brake",         # 1 = freno activo, 0 = inactivo
-    "x",             # posición X del robot (odometría)
-    "y",             # posición Y del robot (odometría)
-    "distance_m",    # distancia acumulada en X-Y hasta esta muestra
-    
-]
+def quaternion_to_yaw(q):
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
-class MetricsLogger(Node):
+
+class StanleyLogger(Node):
 
     def __init__(self):
-        super().__init__('metrics_logger')
+        super().__init__('stanley_logger')
 
-        # ─── Estado ──────────────────────────────────────────────────────
-        self.start_time  = None
-        self.last_clock  = None
-        self.last_time   = None          # dt entre ticks de reloj
+        self.declare_parameter(
+            'output_dir',
+            '/home/jhoan/mrad_ws_2601_delta2/src/delta_measure/data_path_tracking'
+        )
 
-        self.total_distance = 0.0
-        self.brake_active  = False
-        self.brake_event   = False   # ← se pone True solo en el flanco subida
-        self.start_flag     = False
-        
-        self.last_x = None
-        self.last_y = None
-        self.v_ref = 0.0
-        self.w_ref = 0.0
+        self.declare_parameter('path_topic', '/planned_path')
+        self.declare_parameter('save_stanley_errors', True)
 
-        # ─── Archivo CSV ─────────────────────────────────────────────────
-        data_dir = os.path.abspath("/home/jhoan/mrad_ws_2601_delta2/src/delta_measure/data_path_tracking")
-        self.get_logger().info(f"Directorio de datos: {data_dir}")
-        os.makedirs(data_dir, exist_ok=True)
+        output_dir = os.path.expanduser(
+            self.get_parameter('output_dir').value
+        )
 
-        existing = os.listdir(data_dir)
-        pattern = re.compile(r"^(\d+)_metrics_run\.csv$")
-        max_n = 0
-        for name in existing:
-            match = pattern.match(name)
-            self.get_logger().debug(f"Archivo encontrado: {name} → match={bool(match)}")
-            if match:
-                max_n = max(max_n, int(match.group(1)))
-        next_n = max_n + 1
+        path_topic = self.get_parameter(
+            'path_topic').get_parameter_value().string_value
 
-        output_path = os.path.join(data_dir, f"{next_n}_metrics_run.csv")
-        self._csv_file = open(output_path, "w", newline="", encoding="utf-8")
-        self._writer   = csv.DictWriter(self._csv_file, fieldnames=FIELDNAMES)
-        self._writer.writeheader()
-        self._csv_file.flush()
+        self.save_errors = self.get_parameter(
+            'save_stanley_errors').value
 
-        self.get_logger().info(f"Metrics Logger iniciado → {output_path}")
+        os.makedirs(output_dir, exist_ok=True)
 
-        # ─── Subscripciones ──────────────────────────────────────────────
-        self.create_subscription(Bool,         '/start',                         self.start_cb, 10)
-        self.create_subscription(Bool,         '/brake_active',                  self.brake_cb, 10)
-        self.create_subscription(TwistStamped, '/cmd_vel_ttc_gap',               self.ref_cb,   10)
-        self.create_subscription(TwistStamped, '/diffdrive_controller/cmd_vel',  self.cmd_cb,   10)
-        
-        # <-- Swapped /odom for the new /ground_truth_pose bridge topic -->
-        self.create_subscription(Pose,         '/ground_truth_pose',             self.pose_cb,  10)
-        
-        self.create_subscription(Clock,        '/clock',                         self.clock_cb, 10)
-        self.create_subscription(Bool,         '/stop',                          self.stop_cb,  10)
+        pattern = re.compile(r'^(\d+)_experiment\.csv$')
 
-    # ─── Callbacks ───────────────────────────────────────────────────────
+        max_n = max(
+            (int(m.group(1)) for f in os.listdir(output_dir)
+             if (m := pattern.match(f))),
+            default=0
+        )
 
-    def stop_cb(self, msg: Bool):
-        if msg.data:
-            self.get_logger().info("[metrics_logger] Señal /stop recibida — cerrando.")
-            self.close()
-            raise SystemExit   # sale del spin() limpiamente
+        run = max_n + 1
+        csv_path = os.path.join(output_dir, f'{run} path_tracking_data.csv')
 
-    def start_cb(self, msg: Bool):
-        if msg.data and not self.start_flag:
-            self.start_flag = True
-            self.get_logger().info("Señal /start recibida → comenzando medición.")
-            
-    def brake_cb(self, msg: Bool):
-        if msg.data and not self.brake_active:
-            self.brake_event = True    # flanco de subida detectado
-        self.brake_active = msg.data
-        
-    def ref_cb(self, msg: TwistStamped):
-        self.v_ref = msg.twist.linear.x       # ← TwistStamped necesita .twist.
-        self.w_ref = msg.twist.angular.z
+        self.get_logger().info(f'Run {run}')
+        self.get_logger().info(f'CSV → {csv_path}')
 
-    def cmd_cb(self, msg: TwistStamped):
-        """Una muestra → una fila en el CSV."""
-        if not self.start_flag or self.last_clock is None:
-            return 
-        if self.start_time is None or self.last_clock is None:
-            return                            # aún no hay reloj sincronizado
+        self.fields = [
+            "timestamp_s",
+            "elapsed_s",
+            "robot_x",
+            "robot_y",
+            "robot_yaw",
+            "path_x",
+            "path_y",
+        ]
 
-        v = msg.twist.linear.x
-        w = msg.twist.angular.z
+        if self.save_errors:
+            self.fields += [
+                "delta",
+                "cross_track_error",
+                "heading_error",
+            ]
+
+        self._file = open(csv_path, 'w', newline='', encoding='utf-8')
+
+        self.writer = csv.DictWriter(
+            self._file,
+            fieldnames=self.fields
+        )
+
+        self.writer.writeheader()
+        self._file.flush()
+
+        self.recording = False
+        self.start_time = None
+        self.last_clock = None
+
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+
+        self.delta = 0.0
+        self.cross_track_error = 0.0
+        self.heading_error = 0.0
+
+        self.path_saved = False
+
+        self.create_subscription(
+            Bool, '/start', self._start_cb, 10)
+
+        self.create_subscription(
+            Clock, '/clock', self._clock_cb, 10)
+
+        self.create_subscription(
+            Pose, '/ground_truth_pose', self._pose_cb, 10)
+
+        self.create_subscription(
+            Path, path_topic, self._path_cb, 10)
+
+        if self.save_errors:
+
+            self.create_subscription(
+                Float64,
+                '/stanley/delta',
+                self._delta_cb,
+                10
+            )
+
+            self.create_subscription(
+                Float64,
+                '/stanley/cross_track_error',
+                self._cte_cb,
+                10
+            )
+
+            self.create_subscription(
+                Float64,
+                '/stanley/heading_error',
+                self._he_cb,
+                10
+            )
+
+        self.get_logger().info("Esperando /start...")
+
+    # control
+
+    def _start_cb(self, msg):
+
+        if msg.data and not self.recording:
+
+            self.recording = True
+            self.start_time = self.last_clock
+
+            self.get_logger().info("Grabación iniciada")
+
+    def _clock_cb(self, msg):
+
+        self.last_clock = msg.clock.sec + msg.clock.nanosec * 1e-9
+
+        if self.recording and self.start_time is None:
+            self.start_time = self.last_clock
+
+    # robot pose
+
+    def _pose_cb(self, msg: Pose):
+
+        self.x = msg.position.x
+        self.y = msg.position.y
+
+        q = msg.orientation
+        self.yaw = quaternion_to_yaw(q)
+
+        if not self.recording or self.last_clock is None:
+            return
 
         row = {
             "timestamp_s": self.last_clock,
-            "elapsed_s":   self.last_clock - self.start_time,
-            "v_real":      v,
-            "w_real":      w,
-            "brake":       1 if self.brake_event else 0,   # ← solo el flanco
-            "x":           self.last_x if self.last_x is not None else 0.0,
-            "y":           self.last_y if self.last_y is not None else 0.0,
-            "distance_m":  self.total_distance,
+            "elapsed_s": self.last_clock - self.start_time,
+            "robot_x": self.x,
+            "robot_y": self.y,
+            "robot_yaw": self.yaw,
+            "path_x": None,
+            "path_y": None,
         }
-        self.brake_event = False   # ← consumido, vuelve a 0 en la siguiente fila
-        self._writer.writerow(row)
-        self._csv_file.flush()  
 
-    # <-- New callback handling exact Gazebo Pose -->
-    def pose_cb(self, msg: Pose):
-        if not self.start_flag or self.last_clock is None:
-            return 
-        if self.last_time is None:
+        if self.save_errors:
+
+            row.update({
+                "delta": self.delta,
+                "cross_track_error": self.cross_track_error,
+                "heading_error": self.heading_error
+            })
+
+        self.writer.writerow(row)
+        self._file.flush()
+
+    # stanley
+
+    def _delta_cb(self, msg):
+        self.delta = msg.data
+
+    def _cte_cb(self, msg):
+        self.cross_track_error = msg.data
+
+    def _he_cb(self, msg):
+        self.heading_error = msg.data
+
+    # path
+
+    def _path_cb(self, msg: Path):
+
+        if self.path_saved:
             return
-        
-        # In geometry_msgs/Pose, positions are at msg.position.x
-        x = msg.position.x
-        y = msg.position.y
 
-        if self.last_x is not None:
-            self.total_distance += math.hypot(x - self.last_x, y - self.last_y)
-
-        self.last_x = x
-        self.last_y = y
-
-    def clock_cb(self, msg):
-        t = msg.clock.sec + msg.clock.nanosec * 1e-9
-
-        if self.start_time is None:
-            self.start_time = t
-            self.last_clock = t
+        if not msg.poses:
             return
 
-        self.last_time  = t - self.last_clock
-        self.last_clock = t
+        self.get_logger().info(
+            f'Guardando {len(msg.poses)} waypoints del path'
+        )
 
-    # ─── Cierre ──────────────────────────────────────────────────────────
+        for pose in msg.poses:
 
-    def close(self):
-        self._csv_file.flush()
-        self._csv_file.close()
-        self.get_logger().info("CSV cerrado correctamente.")
+            row = {
+                "timestamp_s": None,
+                "elapsed_s": None,
+                "robot_x": None,
+                "robot_y": None,
+                "robot_yaw": None,
+                "path_x": pose.pose.position.x,
+                "path_y": pose.pose.position.y,
+            }
+
+            if self.save_errors:
+
+                row.update({
+                    "delta": None,
+                    "cross_track_error": None,
+                    "heading_error": None
+                })
+
+            self.writer.writerow(row)
+
+        self._file.flush()
+
+        self.path_saved = True
+
+    # cierre
+
+    def _close(self):
+
+        self._file.flush()
+        self._file.close()
+
+        self.get_logger().info("CSV cerrado")
+
 
 def main():
+
     rclpy.init()
-    node = MetricsLogger()
+
+    node = StanleyLogger()
+
     try:
         rclpy.spin(node)
+
     except KeyboardInterrupt:
         pass
+
     finally:
-        node.close()
+
+        node._close()
         node.destroy_node()
         rclpy.shutdown()
 

@@ -13,7 +13,9 @@ def generate_launch_description():
 	use_sim_time = LaunchConfiguration("use_sim_time")
 	use_amcl = LaunchConfiguration("use_amcl")
 	use_waypoints = LaunchConfiguration("use_waypoints")
+	use_start = LaunchConfiguration("use_start")
 	planner_index = LaunchConfiguration("planner_index")
+	inflate_radius = LaunchConfiguration("inflate_radius")
 
 	bringup_share = get_package_share_directory("delta_bringup")
 	ekf_share = get_package_share_directory("delta_ekf")
@@ -29,7 +31,7 @@ def generate_launch_description():
 		PythonLaunchDescriptionSource(
 			os.path.join(bringup_share, "launch", "gz_spawn.launch.py")
 		),
-		launch_arguments={"use_sim_time": use_sim_time, "gz_mode": "False"}.items(),
+		launch_arguments={"use_sim_time": use_sim_time, "gz_mode": "True"}.items(),
 	)
 
 	ekf_launch = IncludeLaunchDescription(
@@ -49,8 +51,9 @@ def generate_launch_description():
 					{
 						"use_sim_time": use_sim_time,
 						"waypoints": use_waypoints,
+						"use_start": use_start,
 						"topics.path_topic": "/planned_path",
-						"geometry.inflate_radius": 0.65,
+						"geometry.inflate_radius": inflate_radius,
 					}
 				],
 				condition=IfCondition(EqualsSubstitution(planner_index, str(idx))),
@@ -63,11 +66,12 @@ def generate_launch_description():
 		name="waypoints_node",
 		output="screen",
 		parameters=[{"use_sim_time": use_sim_time,
-			   "use_start": True,
-			   "manual": True,
+			   "use_start": False,
+			   "manual": False,
 			   "closed_loop": True,
-			   "num_points": 5,
-			   "waypoints_file": "/home/santy-estrada/mrad_ws_2601_delta/src/delta_path_planner/waypoints_json/sample_waypoints.json"}],
+			   "num_points": 40,
+			   "waypoints_file": "/home/jhoan/mrad_ws_2601_delta2/src/delta_path_planner/waypoints_json/two_laps.json"}],
+
 		condition=IfCondition(use_waypoints),
 	)
 
@@ -91,7 +95,7 @@ def generate_launch_description():
 	# Stagger startup so Gazebo and robot interfaces are available first.
 	ekf_after_spawn = TimerAction(period=2.0, actions=[ekf_launch])
 	planners_after_ekf = TimerAction(period=3.0, actions=planner_nodes)
-	waypoints_after_ekf = TimerAction(period=3.0, actions=[waypoints_node])
+	waypoints_after_ekf = TimerAction(period=5.0, actions=[waypoints_node])
 	localization_after_planners = TimerAction(
 		period=4.0,
 		actions=[amcl_localization_launch, slam_localization_launch],
@@ -116,8 +120,18 @@ def generate_launch_description():
 			),
 			DeclareLaunchArgument(
 				"use_waypoints",
-				default_value="false",
+				default_value="true",
 				description="If true planner listens to /waypoints_topic and launches waypoints_node.",
+			),
+			DeclareLaunchArgument(
+				"use_start",
+				default_value="false",
+				description="If true, planner publishes path only after /start in waypoint mode.",
+			),
+			DeclareLaunchArgument(
+				"inflate_radius",
+				default_value="0.65",
+				description="Obstacle inflation radius in meters for planner nodes.",
 			),
 			gz_spawn_launch,
 			ekf_after_spawn,

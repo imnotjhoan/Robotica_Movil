@@ -21,7 +21,7 @@ import tf2_ros
 from dataclasses import dataclass
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Bool
 
 @dataclass
 class ARANode:
@@ -50,6 +50,7 @@ class ARAPlannerNode(Node):
         self.declare_parameter('topics.goal_topic', '/goal_pose')
         self.declare_parameter('topics.path_topic', '/ara_path')
         self.use_waypoints = self.declare_parameter('waypoints', False).value
+        self.use_start = self.declare_parameter('use_start', self.use_waypoints).value
 
         self.declare_parameter('frames.base_frame', 'base_link')
         self.declare_parameter('frames.global_frame', 'map')
@@ -58,13 +59,19 @@ class ARAPlannerNode(Node):
         # Opciones de grilla
         self.declare_parameter('geometry.occupied_threshold', 65)
         self.declare_parameter('geometry.use_8_connected', True)
-        self.declare_parameter('geometry.inflate_radius', 0.5)
         self.declare_parameter('geometry.treat_unknown_as_obstacle', True)
+
+        # Parametros de inflacion (misma estrategia que Best First)
+        self.occ_thresh = self.declare_parameter('occ_thresh', 100).value
+        self.robot_radius_m = self.declare_parameter('robot_radius_m', 0.6).value
+        self.safety_margin_m = self.declare_parameter('safety_margin_m', 0.05).value
+        # Se mantiene por compatibilidad con launch existentes.
+        self.declare_parameter('geometry.inflate_radius', 0.7)
 
         # --- ParÃ¡metros NUEVOS para ARA* ---
         self.declare_parameter('ara_core.epsilon_start', 2.5)       # InflaciÃ³n inicial (Modo rÃ¡pido)
         self.declare_parameter('ara_core.epsilon_decrease', 0.5)    # CuÃ¡nto baja en cada iteraciÃ³n
-        self.declare_parameter('ara_core.time_limit_sec', 0.5)      # Presupuesto de tiempo total
+        self.declare_parameter('ara_core.time_limit_sec', 1.5)      # Presupuesto de tiempo total
         self.declare_parameter('ara_core.heuristic_type', 'euclidean')
 
         self.declare_parameter('debug.publish_all_paths', False)
@@ -96,6 +103,17 @@ class ARAPlannerNode(Node):
         self.path_pub = self.create_publisher(Path, path_topic, 10)
         self.debug_paths_pub = self.create_publisher(MarkerArray, debug_topic, 10)
 
+        self.start_flag = (not self.use_waypoints) or (not self.use_start)
+        self.pending_paths = []
+
+        if self.use_waypoints and self.use_start:
+            self.create_subscription(Bool, '/start', self.start_callback, 10)
+            self.get_logger().info(
+                'ARA start gate enabled. Planning runs immediately; path publication waits for /start.'
+            )
+        elif self.use_waypoints:
+            self.get_logger().info('ARA start gate disabled. Planned paths publish immediately.')
+
         qos_map = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -112,6 +130,7 @@ class ARAPlannerNode(Node):
         self._obstacles: Optional[np.ndarray] = None
         self._dist_cells: Optional[np.ndarray] = None
         self.waypoint_pairs = []
+        self.waypoints_pending_plan = False
         if self._debug_mode:
             self.get_logger().info("ARA* Planner Node Iniciado con los siguientes parÃ¡metros:" \
             f"- Epsilon Start: {self.get_parameter('ara_core.epsilon_start').get_parameter_value().double_value}" \
@@ -119,43 +138,87 @@ class ARAPlannerNode(Node):
             f"- Time Limit (sec): {self.get_parameter('ara_core.time_limit_sec').get_parameter_value().double_value}" \
             f"- Heuristic Type: {self.get_parameter('ara_core.heuristic_type').get_parameter_value().string_value}" \
             f"- Use 8-Connected: {self.get_parameter('geometry.use_8_connected').get_parameter_value().bool_value}" \
-            f"- Inflate Radius: {self.get_parameter('geometry.inflate_radius').get_parameter_value().double_value}")
+            f"- Inflation Occ Thresh: {self.occ_thresh}" \
+            f"- Robot Radius (m): {self.robot_radius_m}" \
+            f"- Safety Margin (m): {self.safety_margin_m}")
 
         self.get_logger().info("ARA* Planner Node Iniciado y esperando el mapa...")
 
     # =================================================================
     # CALLBACKS DE ROS 2
     # =================================================================
+    def start_callback(self, msg: Bool):
+        if not msg.data:
+            return
+        if not self.start_flag:
+            self.get_logger().info('Received /start signal. Releasing queued planned paths.')
+        self.start_flag = True
+        self._publish_pending_paths()
+
+    def _publish_pending_paths(self):
+        if not self.pending_paths:
+            return
+
+        queued_paths = self.pending_paths
+        self.pending_paths = []
+        self.get_logger().info(f'Publishing {len(queued_paths)} queued path message(s).')
+
+        for path_msg, log_msg in queued_paths:
+            self.path_pub.publish(path_msg)
+            self.get_logger().info(log_msg)
+
+    def _publish_or_queue_path(self, path_msg: Path, log_msg: str):
+        if self.start_flag:
+            self.path_pub.publish(path_msg)
+            self.get_logger().info(log_msg)
+        else:
+            self.pending_paths.append((path_msg, log_msg))
+            self.get_logger().info(
+                'Start signal not received yet. Planned path queued for publication.'
+            )
+
     def map_cb(self, msg: OccupancyGrid):
-        """Recibe el mapa, lo guarda y pre-calcula los obstÃ¡culos (Brushfire)."""
+        """Recibe el mapa, lo infla como Best First y prepara obstaculos para ARA*."""
         self._map = msg
         W = msg.info.width
         H = msg.info.height
         res = msg.info.resolution
 
         grid = np.array(msg.data, dtype=np.int16).reshape((H, W))  # row-major: y first
-        self._grid = grid
+
+        # Inflacion estilo Best First: semilla por occ_thresh y radio en celdas
+        inflation_cells = max(
+            0,
+            int(np.floor((float(self.robot_radius_m) + float(self.safety_margin_m)) / res))
+        )
+        inflated_mask = self.make_inflation_mask(grid, inflation_cells, int(self.occ_thresh))
+
+        inflated_grid = grid.copy()
+        inflated_grid[inflated_mask] = 80  # Hard inflation
+        self._grid = inflated_grid
 
         occ_th = self.get_parameter('geometry.occupied_threshold').get_parameter_value().integer_value
         unknown_as_obs = self.get_parameter('geometry.treat_unknown_as_obstacle').get_parameter_value().bool_value
 
-        obstacles = (grid >= occ_th)
+        obstacles = (inflated_grid >= occ_th)
         if unknown_as_obs:
-            obstacles = np.logical_or(obstacles, grid == -1)
-
-        # Precompute distance-to-obstacle field (in cells) from the raw obstacles.
-        # This is useful for both inflation and soft traversal costs.
-        dist_cells = self.compute_distance_to_obstacles(obstacles)
-        self._dist_cells = dist_cells
-
-        # Inflate obstacles if requested (uses distance field: dist <= R).
-        inflate_radius = float(self.get_parameter('geometry.inflate_radius').get_parameter_value().double_value)
-        if inflate_radius > 1e-6:
-            inflation_cells = int(math.ceil(inflate_radius / res))
-            obstacles = np.logical_or(obstacles, dist_cells <= inflation_cells)
+            obstacles = np.logical_or(obstacles, inflated_grid == -1)
 
         self._obstacles = obstacles
-        self.get_logger().info(f'Map received: {W}x{H}, res={res:.3f} m/px')
+        self.get_logger().info(
+            f'Map received: {W}x{H}, res={res:.3f} m/px, inflation_cells={inflation_cells}'
+        )
+
+        if self.use_waypoints and self.waypoints_pending_plan and self.waypoint_pairs:
+            self.get_logger().info('Map ready with pending waypoint plan. Planning waypoint paths now.')
+            self.plan_waypoint_paths()
+
+    def make_inflation_mask(self, grid: np.ndarray, inflation_cells: int, occ_thresh: int) -> np.ndarray:
+        """Devuelve mascara booleana (H,W) con inflacion tipo Best First."""
+        occ = (grid >= occ_thresh)
+        dist_cells = self.compute_distance_to_obstacles(occ)
+        self._dist_cells = dist_cells
+        return dist_cells <= inflation_cells
 
     def compute_distance_to_obstacles(self, obstacles: np.ndarray) -> np.ndarray:
         """Brushfire / multi-source BFS distance transform (4-connected).
@@ -217,8 +280,7 @@ class ARAPlannerNode(Node):
 
         # 3. Publicar si se encontrÃ³ una ruta
         if path_msg is not None:
-            self.path_pub.publish(path_msg)
-            self.get_logger().info("Â¡Ruta ARA* publicada!")
+            self._publish_or_queue_path(path_msg, "Â¡Ruta ARA* publicada!")
         else:
             self.get_logger().error("ARA* fallÃ³ al encontrar una ruta.")
 
@@ -235,6 +297,7 @@ class ARAPlannerNode(Node):
             self.waypoint_pairs.append({'start': start, 'goal': goal})
 
         self.get_logger().info(f'Received {len(self.waypoint_pairs)} waypoint pairs')
+        self.waypoints_pending_plan = True
         self.plan_waypoint_paths()
 
     def plan_waypoint_paths(self):
@@ -261,10 +324,11 @@ class ARAPlannerNode(Node):
             self.get_logger().warn('No combined path could be generated from waypoint pairs')
             return
 
-        self.path_pub.publish(combined_path)
-        self.get_logger().info(
+        self._publish_or_queue_path(
+            combined_path,
             f'Published combined path with {len(combined_path.poses)} total poses'
         )
+        self.waypoints_pending_plan = False
 
     # =================================================================
     # 4. FUNCIONES AUXILIARES 

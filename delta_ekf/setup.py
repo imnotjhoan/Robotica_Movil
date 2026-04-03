@@ -29,6 +29,8 @@ setup(
     entry_points={
         'console_scripts': [
             'ekf_node = delta_ekf.ekf_node:main',
+            'tf_ph_node = delta_ekf.tf_ph_node:main',
+            'tf_ph_nostamp_node = delta_ekf.tf_ph_nostamp_node:main',
             # 'imu_stamper = delta_ekf.imu_stamper:main',
         ],
     },

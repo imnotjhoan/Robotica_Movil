@@ -42,7 +42,7 @@ class MetricsLogger(Node):
         self.w_ref = 0.0
 
         # ─── Archivo CSV ─────────────────────────────────────────────────
-        data_dir = os.path.abspath("/home/santy-estrada/mrad_ws_2601_delta/src/delta_measure/data")
+        data_dir = os.path.abspath("/home/jhoan/mrad_ws_2601_delta2/src/delta_measure/data")
         self.get_logger().info(f"Directorio de datos: {data_dir}")
         os.makedirs(data_dir, exist_ok=True)
 

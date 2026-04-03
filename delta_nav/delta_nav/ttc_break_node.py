@@ -17,8 +17,7 @@ class TTCBreakNode(Node):
         self.declare_parameter('publish_rate', 100.0)           # Hz - rate to check TTC and publish commands
         self.declare_parameter('ttc_threshold', 0.5)            # seconds - TTC threshold for emergency braking
         self.declare_parameter('min_distance_threshold', 0.6)   # meters - minimum distance to obstacle for braking
-        self.declare_parameter('forward_angle_range', 8.0)     # degrees - angle range in front of robot to consider
-        self.declare_parameter('rear_angle_range', 10.0)        # degrees - angle range at rear of robot to consider
+        self.declare_parameter('forward_angle_range', 8.0)      # degrees - angle range in front of robot to consider
         self.declare_parameter('min_range', 0.01)                # meters - ignore measurements closer than this
         self.declare_parameter('max_range', 12.0)               # meters - ignore measurements farther than this
         self.declare_parameter("safety_bubble", True)           # If true, consider all measurements within min_distance_threshold as braking threats regardless of TTC
@@ -29,21 +28,20 @@ class TTCBreakNode(Node):
         self.declare_parameter("narrow_corridor_width_threshold", 1.5)  # meters - activate if left+right width <= this
         self.declare_parameter("narrow_corridor_width_clear_threshold", 1.7)  # meters - clear hysteresis threshold
         self.declare_parameter("narrow_min_points_per_side", 3)   # min valid side-wall points on each side
+        self.declare_parameter("narrow_hold_sec", 0.6)          # keep active for this time after last positive detection
 
-        # Legacy narrow-section params (kept for backwards compatibility in existing YAML files).
+        # Deprecated compatibility params accepted from older YAML files; ignored by current detector.
         self.declare_parameter("narrow_angle_range", 25.0)
         self.declare_parameter("narrow_distance_threshold", 0.85)
         self.declare_parameter("narrow_min_points", 10)
         self.declare_parameter("narrow_ratio_activate", 0.50)
         self.declare_parameter("narrow_ratio_clear", 0.35)
-        self.declare_parameter("narrow_hold_sec", 0.6)          # keep active for this time after last positive detection
 
 
         self.publish_rate = float(self.get_parameter('publish_rate').value)
         self.ttc_threshold = float(self.get_parameter('ttc_threshold').value)
         self.min_distance_threshold = float(self.get_parameter('min_distance_threshold').value)
         self.forward_angle_range = float(self.get_parameter('forward_angle_range').value)
-        self.rear_angle_range = float(self.get_parameter('rear_angle_range').value)
         self.min_range = float(self.get_parameter('min_range').value)
         self.max_range = float(self.get_parameter('max_range').value)
         self.safety_bubble = bool(self.get_parameter('safety_bubble').value)
@@ -60,14 +58,9 @@ class TTCBreakNode(Node):
             self.narrow_corridor_width_threshold,
         )
         self.narrow_min_points_per_side = max(int(self.get_parameter('narrow_min_points_per_side').value), 1)
-
-        # Legacy params are still read to avoid surprises when users keep old YAML entries.
-        self.narrow_angle_range = max(float(self.get_parameter('narrow_angle_range').value), 0.0)
-        self.narrow_distance_threshold = max(float(self.get_parameter('narrow_distance_threshold').value), 0.0)
-        self.narrow_min_points = max(int(self.get_parameter('narrow_min_points').value), 1)
-        self.narrow_ratio_activate = max(float(self.get_parameter('narrow_ratio_activate').value), 0.0)
-        self.narrow_ratio_clear = max(float(self.get_parameter('narrow_ratio_clear').value), 0.0)
         self.narrow_hold_sec = max(float(self.get_parameter('narrow_hold_sec').value), 0.0)
+
+        # Deprecated params are intentionally not used by the width-based narrow detector.
 
         # ---- State ----
         self.current_cmd_vel = TwistStamped()    # Last received command velocity
@@ -345,10 +338,10 @@ class TTCBreakNode(Node):
     
     def _compute_directional_ttc_array(self, scan_msg, cmd_linear_x):
         """
-        Compute TTC for 180 degrees in the direction of motion.
-        - If moving forward: front 180° ([-90°, +90°])
-        - If moving backward: rear 180°
-        - All other rays: inf
+        Compute TTC for the front 180° ([-90°, +90°]).
+        All other rays are set to inf.
+
+        Note: this node is forward-only by design.
         Returns:
             List of TTC values (same size as scan.ranges)
         """
@@ -360,8 +353,6 @@ class TTCBreakNode(Node):
 
             # Half plane = 180 degrees
         half_plane_rad = math.pi / 2.0
-
-        is_moving_forward = cmd_linear_x > 0.0
 
         for i, range_val in enumerate(scan_msg.ranges):
 
@@ -381,12 +372,8 @@ class TTCBreakNode(Node):
             while angle < -math.pi:
                 angle += 2 * math.pi
 
-            if is_moving_forward:
-                    # Front 180° → [-90°, +90°]
-                in_direction = abs(angle) <= half_plane_rad
-            else:
-                    # Rear 180° → outside [-90°, +90°]
-                in_direction = abs(angle) >= half_plane_rad
+            # Front 180° only.
+            in_direction = abs(angle) <= half_plane_rad
 
             if in_direction:
                 ttc = self._calculate_ttc_for_measurement(
@@ -400,7 +387,7 @@ class TTCBreakNode(Node):
     
     def _check_ttc_and_publish(self):
         """
-        Periodically check TTC for forward and rear obstacles and publish safety override if needed.
+        Periodically check TTC for forward obstacles and publish safety override if needed.
         """
         scan_msg = self.last_laser_scan
         ttc_array = []
@@ -419,8 +406,8 @@ class TTCBreakNode(Node):
         # Get the current forward velocity command
         cmd_linear_x = self.current_cmd_vel.twist.linear.x
         
-        # If robot is not moving, compute all TTC as inf and publish
-        if cmd_linear_x == 0.0:
+        # Forward-only mode: treat non-forward commands as stopped.
+        if cmd_linear_x <= 0.0:
             # Create array of inf values for all laser rays
             directional_ttc_array = [float('inf')] * len(scan_msg.ranges)
             # Add direction flag (0.0 for forward by default)
@@ -439,12 +426,8 @@ class TTCBreakNode(Node):
         angle_min = scan_msg.angle_min
         angle_increment = scan_msg.angle_increment
         
-        # Determine if moving forward or backward
-        is_moving_forward = cmd_linear_x > 0.0
-        
-        # Convert angle ranges to radians
+        # Convert forward angle range to radians
         forward_range_rad = math.radians(self.forward_angle_range)
-        rear_range_rad = math.radians(self.rear_angle_range)
         bubble_warn_active = False
         bubble_warn_distance = float('inf')
         bubble_warn_angle = None
@@ -473,14 +456,8 @@ class TTCBreakNode(Node):
                     bubble_warn_angle = angle
                 continue
             
-            # Check if measurement is in relevant cone based on direction of motion
-            in_relevant_zone = False
-            if is_moving_forward:
-                # For forward motion, check front cone (around angle 0)
-                in_relevant_zone = abs(angle) <= forward_range_rad
-            else:
-                # For reverse motion, check rear cone (around angle ±pi)
-                in_relevant_zone = abs(angle) >= (math.pi - rear_range_rad)
+            # Forward-only: check only front cone (around angle 0)
+            in_relevant_zone = abs(angle) <= forward_range_rad
             
             if in_relevant_zone:
                 ttc = self._calculate_ttc_for_measurement(range_val, angle, cmd_linear_x)
@@ -515,12 +492,9 @@ class TTCBreakNode(Node):
                     f"(threshold: {self.min_distance_threshold}m). Direction {dir_msg.data}."
                 )
 
-         # Agregar valor extra según dirección de movimiento
-        if cmd_linear_x >= 0.0:
-            directional_ttc_array.append(0.0)
-        elif cmd_linear_x < 0.0:
-            directional_ttc_array.append(1.0)
-        # Si cmd_linear_x == 0, empieza hacia adelante
+        # Append direction flag as forward-only mode marker.
+        directional_ttc_array.append(0.0)
+
         ttc_msg = Float32MultiArray()
         ttc_msg.data = directional_ttc_array
         self.ttc_array_pub.publish(ttc_msg)
@@ -570,7 +544,7 @@ class TTCBreakNode(Node):
             safety_cmd.twist.linear.x = 0.0      # Zero forward velocity
             safety_cmd.twist.linear.y = 0.0      # No lateral motion
             safety_cmd.twist.linear.z = 0.0      # No vertical motion
-            # Allow rotation and backward motion (don't constrain angular or other linear components)
+            # Allow rotation while braking (do not constrain angular components).
             safety_cmd.twist.angular.x = 0.0    # No pitch
             safety_cmd.twist.angular.y = 0.0      # No roll
             safety_cmd.twist.angular.z = self.current_cmd_vel.twist.angular.z  # Allow rotation if needed

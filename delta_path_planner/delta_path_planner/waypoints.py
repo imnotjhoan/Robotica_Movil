@@ -5,7 +5,6 @@ import tf2_ros
 from rclpy.qos import QoSProfile, DurabilityPolicy
 import json
 from nav_msgs.msg import Path
-from std_msgs.msg import Bool
 
 
 
@@ -18,6 +17,7 @@ class WaypointsNode(Node):
         self.num_points = self.declare_parameter('num_points', 5).value
         self.closed_loop = self.declare_parameter('closed_loop', True).value
         self.waypoints_file = self.declare_parameter('waypoints_file', '/home/santy-estrada/mrad_ws_2601_delta/src/delta_path_planner/waypoints_json/sample_waypoints.json').value
+        # Kept for launch compatibility; /start now gates planner path publication.
         self.use_start = self.declare_parameter('use_start', True).value
 
         qos = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=10)
@@ -36,18 +36,11 @@ class WaypointsNode(Node):
             self.get_logger().info('Waypoints node in AUTO mode. Loading waypoints from file.')
 
         if self.use_start:
-            self.get_logger().info('Start flag mode enabled. Waiting for /start signal to begin publishing waypoints.')
-            self.start_sub = self.create_subscription(
-                Bool,
-                '/start',
-                self.start_callback,
-                10
+            self.get_logger().info(
+                'Waypoint publication is immediate; /start is handled by planner nodes for path publication.'
             )
-            self.start_flag = False
-
         else:
-            self.get_logger().info('Start flag mode disabled. Waypoints will be published immediately when ready.')  
-            self.start_flag = True  
+            self.get_logger().info('Waypoint publication is immediate when waypoint pairs are ready.')
 
         # Publishers (using standard Path for now as a temporary solution)
         # In production, this would publish delta_path_planner/WaypointPair
@@ -61,7 +54,6 @@ class WaypointsNode(Node):
         self.collected_waypoints = []
         self.robot_home_position = None
         self.publishing_active = False
-        self.pending_waypoint_paths = []
 
         if not self.manual:
             # In auto mode, delay loading until TF is available (system is ready)
@@ -69,27 +61,6 @@ class WaypointsNode(Node):
             self.auto_mode_loaded = False
         else:
             self.auto_mode_loaded = True
-
-    def start_callback(self, msg: Bool):
-        if msg.data:
-            if not self.start_flag:
-                self.get_logger().info("Received start signal. Starting control.")
-            self.start_flag = True
-            self._publish_pending_waypoints()
-
-    def _publish_pending_waypoints(self):
-        """Publish any waypoint paths queued while waiting for start signal."""
-        if not self.pending_waypoint_paths:
-            return
-
-        queued_paths = self.pending_waypoint_paths
-        self.pending_waypoint_paths = []
-        self.get_logger().info(
-            f'Publishing {len(queued_paths)} queued waypoint path message(s).'
-        )
-
-        for path, waypoint_pairs in queued_paths:
-            self._publish_path(path, waypoint_pairs)
 
     def _publish_path(self, path: Path, waypoint_pairs):
         """Publish a Path and log all waypoint pairs it contains."""
@@ -228,14 +199,7 @@ class WaypointsNode(Node):
         for pair in waypoint_pairs:
             path.poses.append(pair['start'])
             path.poses.append(pair['goal'])
-
-        if self.start_flag:
-            self._publish_path(path, waypoint_pairs)
-        else:
-            self.pending_waypoint_paths.append((path, waypoint_pairs))
-            self.get_logger().info(
-                'Start signal not received yet. Waypoint pairs are ready and queued for publishing.'
-            )
+        self._publish_path(path, waypoint_pairs)
 
 
 def main(args=None):

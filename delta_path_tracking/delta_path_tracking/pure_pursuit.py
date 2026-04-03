@@ -38,22 +38,25 @@ class PurePursuitNode(Node):
         self.declare_parameter("base_frame", "base_link")
 
         # Control
-        self.declare_parameter("control_rate_hz", 20.0)
+        self.declare_parameter("control_rate_hz", 25.0)
         self.declare_parameter("v_nominal", 4.5)           # m/s
         self.declare_parameter("adaptative_v", True)
         self.declare_parameter("v_min", 1.0)
-        self.declare_parameter("v_max", 5.0)
+        self.declare_parameter("v_max", 6.0)
         self.declare_parameter("kv_heading", 1.0)
         self.declare_parameter("v_smoothing_alpha", 0.3)
         self.declare_parameter("max_speed", 10.0)            # m/s
         self.declare_parameter("max_omega", 1.5)            # rad/s
         self.declare_parameter("goal_tolerance", 0.25)      # m
+        self.declare_parameter("goal_index_window", 100)    # points from end required to accept goal
         self.declare_parameter("use_StartFlag", True)
         self.declare_parameter("use_ttc", True)
         self.declare_parameter("use_narrow_section_speed_reduction", True)
         self.declare_parameter("narrow_section_topic", "/narrow_section_active")
         self.declare_parameter("narrow_speed_factor", 0.8)
         self.declare_parameter("narrow_speed_min", 0.2)
+        self.declare_parameter("use_ttc_brake_speed_reduction", True)
+        self.declare_parameter("ttc_brake_speed", 0.9)
         self.declare_parameter("ttc_brake_topic", "/brake_active")
         self.declare_parameter("ttc_brake_warn_topic", "/brake_warn")
         self.declare_parameter("ttc_dir_topic", "/dir_brake")
@@ -93,6 +96,7 @@ class PurePursuitNode(Node):
         self.max_speed = float(self.get_parameter("max_speed").value)
         self.max_omega = float(self.get_parameter("max_omega").value)
         self.goal_tol = float(self.get_parameter("goal_tolerance").value)
+        self.goal_index_window = int(self.get_parameter("goal_index_window").value)
         self.use_start_flag = bool(self.get_parameter("use_StartFlag").value)
         self.use_ttc = bool(self.get_parameter("use_ttc").value)
         self.use_narrow_section_speed_reduction = bool(
@@ -105,6 +109,10 @@ class PurePursuitNode(Node):
             1.0,
         )
         self.narrow_speed_min = max(float(self.get_parameter("narrow_speed_min").value), 0.0)
+        self.use_ttc_brake_speed_reduction = bool(
+            self.get_parameter("use_ttc_brake_speed_reduction").value
+        )
+        self.ttc_brake_speed = max(float(self.get_parameter("ttc_brake_speed").value), 0.0)
         self.ttc_brake_topic = str(self.get_parameter("ttc_brake_topic").value)
         self.ttc_brake_warn_topic = str(self.get_parameter("ttc_brake_warn_topic").value)
         self.ttc_dir_topic = str(self.get_parameter("ttc_dir_topic").value)
@@ -240,6 +248,16 @@ class PurePursuitNode(Node):
             f"(v_min={self.v_min:.2f}, v_max={self.v_adapt_max:.2f}, kv_heading={self.kv_heading:.2f}, "
             f"alpha={self.v_smoothing_alpha:.2f})"
         )
+        self.get_logger().info(
+            "Goal gating enabled "
+            f"(goal_tolerance={self.goal_tol:.2f} m, index_window={self.goal_index_window} points, "
+            "<=0 disables gate)."
+        )
+        self.get_logger().info(
+            "TTC brake speed cap "
+            f"({'enabled' if self.use_ttc_brake_speed_reduction else 'disabled'}, "
+            f"speed={self.ttc_brake_speed:.2f} m/s when brake is active)."
+        )
 
     def start_callback(self, msg: Bool) -> None:
         if msg.data:
@@ -293,6 +311,17 @@ class PurePursuitNode(Node):
         reduced_speed = speed_cmd * self.narrow_speed_factor
         min_speed = min(self.narrow_speed_min, upper_bound)
         return clamp(reduced_speed, min_speed, upper_bound)
+
+    def apply_ttc_brake_speed_reduction(self, speed_cmd: float, upper_bound: float) -> float:
+        speed_cmd = clamp(speed_cmd, 0.0, upper_bound)
+
+        if not self.use_ttc_brake_speed_reduction:
+            return speed_cmd
+        if not self.use_ttc or not self.ttc_brake_active:
+            return speed_cmd
+
+        brake_speed_cap = min(self.ttc_brake_speed, upper_bound)
+        return clamp(min(speed_cmd, brake_speed_cap), 0.0, upper_bound)
 
     def publish_error_signals(
         self,
@@ -359,7 +388,6 @@ class PurePursuitNode(Node):
         self.path = list(msg.poses)
         self.path_frame = msg.header.frame_id if msg.header.frame_id else None
         self.has_path = len(self.path) > 0 and self.path_frame is not None
-        self.last_target_index = 0  # reset; you can improve by finding closest point here
 
         if not self.has_path:
             self.get_logger().warn("Received empty path or missing frame_id.")
@@ -397,8 +425,18 @@ class PurePursuitNode(Node):
         goal_dx = goal_pose_b.pose.position.x
         goal_dy = goal_pose_b.pose.position.y
         goal_dist = math.hypot(goal_dx, goal_dy)
+        n = len(self.path)
 
-        if goal_dist <= self.goal_tol:
+        # Mirror Stanley-style "near-end" gating to avoid immediate goal on closed loops.
+        # If window <= 0, disable this gate and keep original tolerance-only behavior.
+        if self.goal_index_window <= 0:
+            goal_window_reached = True
+        else:
+            # Clamp the effective window so it remains meaningful on short paths.
+            effective_goal_window = min(self.goal_index_window, max(n - 1, 1))
+            goal_window_reached = (n <= 1) or (n - self.last_target_index <= effective_goal_window)
+
+        if goal_dist <= self.goal_tol and goal_window_reached:
             if self.use_start_flag and self.start_flag:
                 self.get_logger().info(
                     "Goal reached. Stopping and waiting for next /start signal."
@@ -412,9 +450,11 @@ class PurePursuitNode(Node):
         if self.use_adaptative_v:
             v_for_lookahead = clamp(self.prev_v_cmd, 0.0, self.v_adapt_max)
             v_for_lookahead = self.apply_narrow_speed_reduction(v_for_lookahead, self.v_adapt_max)
+            v_for_lookahead = self.apply_ttc_brake_speed_reduction(v_for_lookahead, self.v_adapt_max)
         else:
             v_for_lookahead = clamp(self.v_nominal, 0.0, self.max_speed)
             v_for_lookahead = self.apply_narrow_speed_reduction(v_for_lookahead, self.max_speed)
+            v_for_lookahead = self.apply_ttc_brake_speed_reduction(v_for_lookahead, self.max_speed)
         Ld = clamp(self.L0 + self.kv * abs(v_for_lookahead), self.Lmin, self.Lmax)
 
         # 4) Select target point in base_link frame
@@ -438,9 +478,11 @@ class PurePursuitNode(Node):
             v_cmd = (1.0 - self.v_smoothing_alpha) * self.prev_v_cmd + self.v_smoothing_alpha * v_target
             v_cmd = clamp(v_cmd, self.v_min, self.v_adapt_max)
             v_cmd = self.apply_narrow_speed_reduction(v_cmd, self.v_adapt_max)
+            v_cmd = self.apply_ttc_brake_speed_reduction(v_cmd, self.v_adapt_max)
         else:
             v_cmd = clamp(self.v_nominal, 0.0, self.max_speed)
             v_cmd = self.apply_narrow_speed_reduction(v_cmd, self.max_speed)
+            v_cmd = self.apply_ttc_brake_speed_reduction(v_cmd, self.max_speed)
 
         cross_track_error = by
         kappa = (2.0 * by) / (Ld * Ld + self.eps)
@@ -486,7 +528,7 @@ class PurePursuitNode(Node):
 
         best_fallback = None  # last pose ahead, in case none reaches Ld
 
-        for i in range(int(start), n):
+        for i in range(int(start), min(int(start) + 100, n)):  # Limit the search
             pose_b = self.transform_pose_to_base(self.path[i], tf)
             if pose_b is None:
                 continue

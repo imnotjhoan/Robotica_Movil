@@ -1,0 +1,1 @@
+timestamp_s,elapsed_s,v_real,w_real,brake,x,y,distance_m,delta,cross_track_error,heading_error,path_length_m,path_progress_m,dist_to_nearest_wp,wp_index
