@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-extract_bag.py  --  Read a rosbag and export synchronized data to CSV (Pose & Joy).
-
-Usage:
-    python3 extract_bag.py <path_to_bag_folder>
+extract_bag.py  --  Read a rosbag, export raw and synchronized data to CSV.
 """
 
 import sys
@@ -13,91 +10,104 @@ from pathlib import Path
 from rosbags.rosbag2 import Reader
 from rosbags.typesys import Stores, get_typestore
 
-# Configuración de ruta y tipos de ROS 2
+# --- Configuración ---
+# --- Configuración ---
 BAG_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
-TYPESTORE = get_typestore(Stores.ROS2_JAZZY)
+TYPESTORE = get_typestore(Stores.ROS2_JAZZY)    
+OUTPUT_DIR = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data")
+OUTPUT_DIR_SYNC = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data/synchronized")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR_SYNC.mkdir(parents=True, exist_ok=True)
 
+
+# Nombre base derivado del bag
+bag_name = BAG_PATH.name
+
+# Parámetro de sincronización (50 Hz)
+DT_SYNC = 0.02 
 
 def read_topic(reader, typestore, topic_name, fields_fn):
-    """Extrae (timestamp_s, *fields) de un tópico usando una función extractora."""
     rows = []
     connections = [c for c in reader.connections if c.topic == topic_name]
     if not connections:
-        print(f"  WARNING: topic '{topic_name}' not found in bag")
         return pd.DataFrame()
     for conn, timestamp, rawdata in reader.messages(connections=connections):
         msg = typestore.deserialize_cdr(rawdata, conn.msgtype)
-        t = timestamp * 1e-9  # nanosegundos → segundos
+        t = timestamp * 1e-9  
         rows.append((t,) + fields_fn(msg))
     return pd.DataFrame(rows)
 
-
 def extract_pose(msg):
-    """Extrae posición y convierte cuaternión a Yaw."""
-    p = msg.position
-    o = msg.orientation
-    # Asunción 2D: Cálculo de Yaw
-    yaw = np.arctan2(
-        2.0 * (o.w * o.z + o.x * o.y),
-        1.0 - 2.0 * (o.y * o.y + o.z * o.z)
-    )
+    # Manejo robusto de Pose vs PoseStamped
+    try:
+        p, o = msg.position, msg.orientation
+    except AttributeError:
+        p, o = msg.pose.position, msg.pose.orientation
+    
+    yaw = np.arctan2(2.0 * (o.w * o.z + o.x * o.y), 1.0 - 2.0 * (o.y * o.y + o.z * o.z))
     return (p.x, p.y, p.z, yaw)
 
-
 def extract_joy(msg):
-    """Extrae datos del control (throttle y steering)."""
-    # axes[1] = stick izquierdo vertical, axes[3] = stick derecho horizontal
     throttle = float(msg.axes[1]) if len(msg.axes) > 1 else 0.0
     steering  = float(msg.axes[3]) if len(msg.axes) > 3 else 0.0
     return (throttle, steering)
 
-
-# --- Proceso de lectura ---
+# --- Proceso ---
 with Reader(BAG_PATH) as reader:
     print(f"Reading bag: {BAG_PATH}")
-
-    # Solo extraemos Pose (Vicon) y Joy
     df_pose = read_topic(reader, TYPESTORE, "/robot1/pose", extract_pose)
     df_joy  = read_topic(reader, TYPESTORE, "/joy", extract_joy)
 
-# Verificación de datos extraídos
 if df_pose.empty:
-    print("ERROR: No se encontraron datos de Pose. Verifica el nombre del tópico.")
+    print("ERROR: No se encontraron datos de Pose.")
     sys.exit(1)
 
-# Asignación de nombres de columnas
+# Nombres y Limpieza
 df_pose.columns = ["t", "x", "y", "z", "yaw"]
 if not df_joy.empty:
-    df_joy.columns  = ["t", "joy_throttle", "joy_steering"]
+    df_joy.columns = ["t", "joy_throttle", "joy_steering"]
 
-# Ordenar por tiempo
-for df in [df_pose, df_joy]:
-    if not df.empty:
-        df.sort_values("t", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-# Alinear tiempo para que comience en 0 (basado en el primer dato de Pose)
-t0 = df_pose["t"].iloc[0]
+# Alineación de tiempo (t=0)
+t0 = df_pose["t"].min()
 df_pose["t"] -= t0
 if not df_joy.empty:
     df_joy["t"] -= t0
-
-# Guardar archivos CSV
-# Guardar archivos CSV en la carpeta data
-output_dir = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data")
-# Guardar archivos CSV en la carpeta data
-output_dir = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data")
-
-df_pose.to_csv(output_dir / "pose_raw.csv", index=False)
+# 1. Guardar archivos RAW
+df_pose.to_csv(OUTPUT_DIR / f"{bag_name}_pose_raw.csv", index=False)
 if not df_joy.empty:
-    df_joy.to_csv(output_dir / "joy_raw.csv", index=False)
+    df_joy.to_csv(OUTPUT_DIR / f"{bag_name}_joy_raw.csv", index=False)
 
-# Resumen en consola
+
+# 2. SINCRONIZACIÓN (Interpolación)
+print("Sincronizando datos a 50Hz...")
+
+# Crear vector de tiempo uniforme basado en la intersección de ambos sensores
+t_min = max(df_pose["t"].min(), df_joy["t"].min() if not df_joy.empty else 0)
+t_max = min(df_pose["t"].max(), df_joy["t"].max() if not df_joy.empty else 1e9)
+t_sync = np.arange(t_min, t_max, DT_SYNC)
+
+df_sync = pd.DataFrame({"t": t_sync})
+
+# Interpolar Posición (Lineal: el auto se mueve suavemente entre puntos)
+for col in ["x", "y", "z", "yaw"]:
+    df_sync[col] = np.interp(t_sync, df_pose["t"], df_pose[col])
+
+# Interpolar Joy (Zero-Order Hold: el comando se mantiene hasta el siguiente cambio)
+if not df_joy.empty:
+    for col in ["joy_throttle", "joy_steering"]:
+        # Usamos np.interp con los datos de joy pero con un pequeño truco
+        # para que se comporte como escalones (no líneas diagonales)
+        from scipy.interpolate import interp1d
+        
+        # 'kind=step-after' o 'nearest' asegura que el comando no se "invente" valores intermedios
+        f_joy = interp1d(df_joy["t"], df_joy[col], kind='nearest', fill_value="extrapolate")
+        df_sync[col] = f_joy(t_sync)
+
+# Guardar el resultado final
+
+df_sync.to_csv(OUTPUT_DIR_SYNC / f"{bag_name}_data_synchronized.csv", index=False)
+
 print("-" * 30)
-print(f"  VICON: {len(df_pose)} muestras, dt={df_pose['t'].diff().median()*1000:.1f} ms")
-if not df_joy.empty:
-    print(f"  Joy:   {len(df_joy)} muestras, dt={df_joy['t'].diff().median()*1000:.1f} ms")
-    print("Saved: pose_raw.csv, joy_raw.csv")
-else:
-    print("  Joy:   No se encontraron datos.")
-    print("Saved: pose_raw.csv")
+print(f"Completado exitosamente.")
+print(f"Archivos guardados en: {OUTPUT_DIR}")
+print(f"Muestras sincronizadas: {len(df_sync)}")
