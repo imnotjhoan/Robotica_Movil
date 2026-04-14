@@ -21,6 +21,7 @@ def generate_launch_description():
 
     # --- Robot description (xacro -> URDF XML string) ---
     xacro_file = os.path.join(get_package_share_directory(description_pkg_name), "diffdrive_urdf", "robot_ph.urdf.xacro")
+    # xacro_file = os.path.join(get_package_share_directory(description_pkg_name), "diffdrive_urdf", "robot.urdf.xacro")
     robot_description = xacro.process_file(xacro_file).toxml()
 
     rsp = Node(

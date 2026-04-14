@@ -15,7 +15,7 @@ from pathlib import Path
 from scipy.signal import savgol_filter, medfilt
 
 # ── Reemplazar ceros por NaN (datos inválidos) ─────────────────────────
-def replace_zeros_with_nan(x, y, yaw, tol=1e-6):
+def replace_zeros_with_nan(x, y, yaw, tol=1e-5):
     mask_invalid = (
         (np.abs(x) < tol) &
         (np.abs(y) < tol) &
@@ -122,7 +122,8 @@ y = y * ESCALA
 
 
 # ── Corrección de saltos grandes ─────────────────────────────
-yaw = remove_jumps(yaw, threshold=1.5)   # rad
+yaw = remove_jumps(yaw, threshold=0.1)
+# yaw = remove_jumps(yaw, threshold=0.10)   # rad (PARA 22 VEL)
 # x   = remove_jumps(x, threshold=1000.0)     # m
 # y   = remove_jumps(y, threshold=1000.0)
 
@@ -144,7 +145,7 @@ if APLICAR_LIMPIEZA:
     # 2. Eliminar clusters de outliers
     x   = hampel_filter(x, window_size=WINDOW_HAMPEL, n_sigmas=N_SIGMAS)
     y   = hampel_filter(y, window_size=WINDOW_HAMPEL, n_sigmas=N_SIGMAS)
-    yaw = hampel_filter(yaw, window_size=WINDOW_HAMPEL, n_sigmas=N_SIGMAS)
+    yaw = hampel_filter(yaw, window_size=3, n_sigmas=2)
     # después de derivar
 
 
@@ -155,6 +156,8 @@ POLY   = 3
 
 dt = np.median(np.diff(t))
 print(f"Usando dt = {dt:.4f} s para derivación")
+
+
 
 vx    = savgol_filter(x,   window_length=WINDOW, polyorder=POLY, deriv=1, delta=dt)
 vy    = savgol_filter(y,   window_length=WINDOW, polyorder=POLY, deriv=1, delta=dt)
@@ -187,6 +190,7 @@ print(f"v range : [{v_signed.min():.3f}, {v_signed.max():.3f}] m/s")
 print(f"ω range : [{omega.min():.3f}, {omega.max():.3f}] rad/s")
 
 import matplotlib.pyplot as plt
+
 
 # Crear figura con 4 subplots (2 filas x 2 columnas)
 fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
@@ -222,5 +226,22 @@ axs[1, 1].set_title("Posición x,y vs tiempo")
 axs[1, 1].grid(True)
 axs[1, 1].legend()
 
+# ── Gráfico de vx(t) y vy(t) ─────────────────────────────────────────────
+fig2, ax = plt.subplots(figsize=(10, 6))
+
+ax.plot(t, vx, label="vx(t)", color="cyan")
+ax.plot(t, vy, label="vy(t)", color="magenta")
+
+ax.set_xlabel("Tiempo [s]")
+ax.set_ylabel("Velocidad [m/s]")
+ax.set_title("Componentes de velocidad vx, vy vs tiempo")
+ax.grid(True)
+ax.legend()
+
+print("Primeros 20 dt:", np.diff(t)[:20])
+print("Rango de y:", y.min(), y.max())
+
 plt.tight_layout()
 plt.show()
+
+

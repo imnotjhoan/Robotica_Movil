@@ -1,125 +1,215 @@
 #!/usr/bin/env python3
 """
-fit_model.py  --  Fit a 1st-order vehicle speed model to VICON + ESC data.
-
-Model:
-    u_eff = apply_deadzone(u, u_dead)
-    dv/dt = (K * u_eff - v) / tau
-
-Optimizes [K, tau, u_dead] to minimize MSE between simulated v and v_vicon.
-Set SKIP_OPTIMIZE = True to skip fitting and only validate with known params.
+fit_model_multi_fopdt.py  --  Modelo de Primer Orden + Dead Time (FOPDT) multi-experimento.
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.optimize import minimize
+from pathlib import Path
+from scipy.optimize import minimize, differential_evolution
 from scipy.interpolate import interp1d
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-SKIP_OPTIMIZE = False          # Set True to skip fitting, use KNOWN_PARAMS below
-KNOWN_PARAMS  = (1.23, 0.28, 0.06)  # (K, tau, u_dead) ← paste your fitted values here
+# ── Directorios ────────────────────────────────────────────────────────────────
+VEL_DIR = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data/velocity_clean")
+# CMD_DIR = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data/cmd_vel")
+CMD_DIR = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data/")
+OUT_DIR = Path("/home/jhoan/mrad_ws_2601_delta2/src/delta_esc/scripts/data/model_fit")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Load data ──────────────────────────────────────────────────────────────────
-df_v   = pd.read_csv("vicon_velocity.csv")
-df_cmd = pd.read_csv("esc_command_raw.csv")
+# ── Lista de experimentos ──────────────────────────────────────────────────────
+EXPERIMENTS = [
+    {
+        "label"  : "28 %",
+        "vel_csv": VEL_DIR / "sysid_run_28_vel_velocity.csv",
+        "cmd_csv": CMD_DIR / "sysid_run_28_vel_joy_raw.csv",
+    },
 
-t_vicon = df_v["t"].values
-v_vicon = df_v["v"].values
+    # Agrega más aquí...
+]
 
-t_cmd = df_cmd["t"].values
-u_raw = df_cmd["u"].values
+# ── Bounds: [K, tau, u_dead, theta] ───────────────────────────────────────────
+BOUNDS = [
+    (0.005, 0.8),    # K      [m/s por %]
+    (0.005,  4.0),    # tau    [s]
+    (0.0,  20.0),    # u_dead [%]
+    (0.0,  2.5),     # theta  (dead time) [s]
+]
 
-# Interpolate ESC command onto VICON time axis
-u_interp_fn = interp1d(t_cmd, u_raw, kind="zero", fill_value="extrapolate")
-u = u_interp_fn(t_vicon)
+WEIGHTS = None   # None = peso igual para todos los experimentos
 
-dt = np.median(np.diff(t_vicon))
+# ── Carga de datos (sin cambios importantes) ───────────────────────────────────
+def load_experiment(exp: dict) -> dict | None:
+    vel_path = exp["vel_csv"]
+    cmd_path = exp["cmd_csv"]
+
+    if not vel_path.exists() or not cmd_path.exists():
+        print(f"  [SKIP] Archivo no encontrado: {exp['label']}")
+        return None
+
+    df_v   = pd.read_csv(vel_path)
+    df_cmd = pd.read_csv(cmd_path)
+
+    t_col_v = "t_bag" if "t_bag" in df_v.columns else df_v.columns[0]
+    v_col   = "v"     if "v"     in df_v.columns else df_v.columns[1]
+    t_col_c = "t_bag" if "t_bag" in df_cmd.columns else df_cmd.columns[0]
+    u_col   = "linear_x_pct" if "linear_x_pct" in df_cmd.columns else df_cmd.columns[-1]
+
+    t_v = df_v[t_col_v].values.astype(float) - df_v[t_col_v].values[0]
+    v   = df_v[v_col].values.astype(float)
+    t_c = df_cmd[t_col_c].values.astype(float) - df_cmd[t_col_c].values[0]
+    u   = df_cmd[u_col].values.astype(float)
+
+    t_common = t_v[(t_v >= t_c.min()) & (t_v <= t_c.max())]
+    if len(t_common) < 10:
+        print(f"  [SKIP] Solapamiento insuficiente: {exp['label']}")
+        return None
+
+    u_fn = interp1d(t_c, u, kind="zero", fill_value="extrapolate")
+    u_align = u_fn(t_common)
+    v_align = np.interp(t_common, t_v, v)
+    dt = np.median(np.diff(t_common))
+
+    print(f"  [OK]  {exp['label']:8s}  →  {len(t_common)} pts | "
+          f"u [{u_align.min():.1f}, {u_align.max():.1f}]% | "
+          f"v [{v_align.min():.2f}, {v_align.max():.2f}] m/s")
+
+    return {"label": exp["label"], "t": t_common, "v": v_align, "u": u_align, "dt": dt}
 
 
-# ── Model simulation ───────────────────────────────────────────────────────────
-def apply_deadzone(u_arr, u_dead):
+# ── Modelo FOPDT con dead time ─────────────────────────────────────────────────
+def apply_deadzone(u_arr: np.ndarray, u_dead: float) -> np.ndarray:
     u_eff = np.zeros_like(u_arr)
-    mask_pos = u_arr >  u_dead
-    mask_neg = u_arr < -u_dead
-    u_eff[mask_pos] = u_arr[mask_pos] - u_dead
-    u_eff[mask_neg] = u_arr[mask_neg] + u_dead
+    u_eff[u_arr >  u_dead] = u_arr[u_arr >  u_dead] - u_dead
+    u_eff[u_arr < -u_dead] = u_arr[u_arr < -u_dead] + u_dead
     return u_eff
 
 
-def simulate_model(params, u_arr, dt):
-    K, tau, u_dead = params
+def simulate(params: list, u_arr: np.ndarray, dt: float, v0: float = 0.0) -> np.ndarray:
+    """Simulación FOPDT: Primer Orden + Dead Time + Deadzone"""
+    K, tau, u_dead, theta = params
+    
     u_eff = apply_deadzone(u_arr, u_dead)
+    
+    # Aplicar dead time (desplazamiento)
+    n_delay = max(0, int(round(theta / dt)))
+    u_delayed = np.zeros_like(u_eff)
+    if n_delay == 0:
+        u_delayed = u_eff
+    else:
+        u_delayed[n_delay:] = u_eff[:-n_delay]
+
+    # Integración Euler
     v = np.zeros(len(u_arr))
+    v[0] = v0
     for i in range(1, len(u_arr)):
-        dvdt = (K * u_eff[i - 1] - v[i - 1]) / tau
-        v[i] = v[i - 1] + dvdt * dt
+        dvdt = (K * u_delayed[i-1] - v[i-1]) / tau
+        v[i] = v[i-1] + dvdt * dt
     return v
 
 
-def cost(params):
-    K, tau, u_dead = params
-    if K <= 0 or tau <= 0 or u_dead < 0 or u_dead > 0.5:
+# ── Función de costo multi-experimento ────────────────────────────────────────
+weights = np.array(WEIGHTS if WEIGHTS is not None else [1.0] * len(EXPERIMENTS))
+weights = weights / weights.sum()
+
+def cost_total(params: list) -> float:
+    if any(p < 0 for p in params):   # penalización parámetros no físicos
         return 1e9
-    v_sim = simulate_model(params, u, dt)
-    return np.mean((v_sim - v_vicon) ** 2)
+
+    total_mse = 0.0
+    for ds, w in zip(datasets, weights):
+        v0 = ds["v"][0]                    # condición inicial real
+        v_sim = simulate(params, ds["u"], ds["dt"], v0=v0)
+        mse = np.mean((v_sim - ds["v"]) ** 2)
+        total_mse += w * mse
+    return total_mse
 
 
-# ── Optimization or load known params ─────────────────────────────────────────
-if SKIP_OPTIMIZE:
-    K_fit, tau_fit, u_dead_fit = KNOWN_PARAMS
-    v_fit = simulate_model(KNOWN_PARAMS, u, dt)
-    mse   = np.mean((v_fit - v_vicon) ** 2)
-    print(f"\n── Using Known Parameters (no optimization) ─────────")
-else:
-    x0     = [1.0, 0.3, 0.05]
-    bounds = [(0.1, 5.0), (0.01, 2.0), (0.0, 0.4)]
-    result = minimize(cost, x0, method="L-BFGS-B", bounds=bounds,
-                      options={"maxiter": 1000, "ftol": 1e-10})
-    K_fit, tau_fit, u_dead_fit = result.x
-    v_fit  = simulate_model(result.x, u, dt)
-    mse    = result.fun
-    print(f"\n── Fitted Parameters ────────────────────────────────")
+# ── Carga datos ───────────────────────────────────────────────────────────────
+print("\n── Cargando experimentos ────────────────────────────────────────────────")
+datasets = []
+for exp in EXPERIMENTS:
+    data = load_experiment(exp)
+    if data is not None:
+        datasets.append(data)
 
-print(f"  K      = {K_fit:.4f}  m/s per unit command")
-print(f"  tau    = {tau_fit:.4f}  s  (time constant)")
-print(f"  u_dead = {u_dead_fit:.4f}  (normalized dead zone)")
-print(f"  MSE    = {mse:.6f}  (m/s)²")
-print(f"  RMSE   = {np.sqrt(mse):.4f}  m/s")
+if not datasets:
+    raise SystemExit("ERROR: No se cargaron experimentos.")
+
+print(f"\nTotal experimentos cargados: {len(datasets)}\n")
 
 
-# ── Validation with known params ───────────────────────────────────────────────
-print(f"\n── Validation (known params on current dataset) ─────")
-K_fit, tau_fit, u_dead_fit = KNOWN_PARAMS if SKIP_OPTIMIZE else (K_fit, tau_fit, u_dead_fit)
-v_val = simulate_model([K_fit, tau_fit, u_dead_fit], u, dt)
-rmse  = np.sqrt(np.mean((v_val - v_vicon) ** 2))
-print(f"  Validation RMSE: {rmse:.4f} m/s")
+# ── Optimización ──────────────────────────────────────────────────────────────
+print("── Optimización FOPDT ───────────────────────────────────────────────────")
+print("Etapa 1: Búsqueda global (Differential Evolution)...")
 
+de_result = differential_evolution(
+    cost_total,
+    bounds=BOUNDS,
+    seed=42,
+    maxiter=800,
+    popsize=25,
+    tol=1e-8,
+    polish=False
+)
+print(f"Etapa 1 terminada → MSE = {de_result.fun:.6f}")
 
-# ── Plot ───────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-ax1, ax2, ax3 = axes
+print("Etapa 2: Refinamiento local (L-BFGS-B)...")
+result = minimize(
+    cost_total,
+    de_result.x,
+    method="L-BFGS-B",
+    bounds=BOUNDS,
+    options={"maxiter": 2000, "ftol": 1e-12}
+)
 
-ax1.plot(t_vicon, v_vicon, label="VICON (ground truth)", color="steelblue")
-ax1.plot(t_vicon, v_fit,   label=f"Model fit  (K={K_fit:.3f}, τ={tau_fit:.3f}, dead={u_dead_fit:.3f})",
-         color="tomato", linestyle="--")
-ax1.set_ylabel("Speed [m/s]")
-ax1.set_title("Fit")
-ax1.legend(); ax1.grid(True)
+K_fit, tau_fit, u_dead_fit, theta_fit = result.x
+rmse_total = np.sqrt(result.fun)
 
-ax2.plot(t_vicon, v_vicon, label="VICON (ground truth)", color="steelblue")
-ax2.plot(t_vicon, v_val,   label=f"Validation (RMSE={rmse:.4f} m/s)",
-         color="mediumseagreen", linestyle="--")
-ax2.set_ylabel("Speed [m/s]")
-ax2.set_title("Validation")
-ax2.legend(); ax2.grid(True)
+print("\n── Parámetros ajustados (FOPDT) ────────────────────────────────────────")
+print(f"K       = {K_fit:.5f}   m/s por %")
+print(f"tau     = {tau_fit:.5f}   s")
+print(f"u_dead  = {u_dead_fit:.3f}   %")
+print(f"theta   = {theta_fit:.4f}   s   ← Dead Time")
+print(f"RMSE    = {rmse_total:.4f}   m/s")
 
-ax3.step(t_vicon, u, label="ESC command u", color="orange", where="post")
-ax3.set_ylabel("ESC command [-1, +1]")
-ax3.set_xlabel("Time [s]")
-ax3.legend(); ax3.grid(True)
+# ── Gráficas ──────────────────────────────────────────────────────────────────
+n_exp = len(datasets)
+fig, axes = plt.subplots(n_exp, 2, figsize=(14, 4.5 * n_exp))
 
+if n_exp == 1:
+    axes = np.array([axes])
+
+for i, ds in enumerate(datasets):
+    v0 = ds["v"][0]
+    v_sim = simulate(result.x, ds["u"], ds["dt"], v0=v0)
+    rmse_i = np.sqrt(np.mean((v_sim - ds["v"])**2))
+
+    ax_v, ax_u = axes[i]
+
+    ax_v.plot(ds["t"], ds["v"], color="steelblue", label="Medición (VICON)")
+    ax_v.plot(ds["t"], v_sim,  color="tomato", linestyle="--",
+              label=f"Modelo (RMSE={rmse_i:.4f} m/s)")
+    ax_v.set_title(f"Experimento {ds['label']}")
+    ax_v.set_ylabel("Velocidad [m/s]")
+    ax_v.legend()
+    ax_v.grid(True)
+
+    ax_u.step(ds["t"], ds["u"], color="darkorange", where="post", label="u [%]")
+    ax_u.set_ylabel("Entrada [%]")
+    ax_u.set_xlabel("Tiempo [s]")
+    ax_u.legend()
+    ax_u.grid(True)
+
+fig.suptitle(
+    f"Modelo FOPDT  –  K={K_fit:.4f} m/s·%⁻¹ | τ={tau_fit:.4f} s | "
+    f"u_dead={u_dead_fit:.2f}% | θ={theta_fit:.3f}s | RMSE={rmse_total:.4f} m/s",
+    fontsize=12
+)
 plt.tight_layout()
-plt.savefig("model_fit.png", dpi=150)
+
+plot_path = OUT_DIR / "model_fit_fopdt.png"
+plt.savefig(plot_path, dpi=180, bbox_inches='tight')
 plt.show()
-print("Saved: model_fit.png")
+
+print(f"\nGráfica guardada en: {plot_path}")

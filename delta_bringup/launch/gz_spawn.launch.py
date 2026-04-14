@@ -58,7 +58,7 @@ def generate_launch_description():
                 "gz_sim.launch.py",
             )
         ),
-        launch_arguments={"gz_args": ['-r -s -v4 ', world], 'headless-rendering': 'true', 'on_exit_shutdown': 'true'}.items(),
+        launch_arguments={"gz_args": ['-r  -v4 ', world], 'headless-rendering': 'true', 'on_exit_shutdown': 'true'}.items(),
         condition=UnlessCondition(LaunchConfiguration('gz_mode')),
     )
 
@@ -140,7 +140,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
         'gz_mode',
-        default_value='True',
+        default_value='False',
         description='Set to True to launch the specific node'
         ),
         gz_launch,

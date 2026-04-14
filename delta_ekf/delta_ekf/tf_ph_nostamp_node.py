@@ -46,9 +46,13 @@ class tf_ph_nostamp_node(Node):
         # Aquí podrías almacenar la última pose recibida y usarla para actualizar la transformación
         # Por simplicidad, este ejemplo no lo hace, pero en una implementación real deberías hacerlo.
         # Translation
-        t.transform.translation.x = self.position.position.x/1000   # <-- CAMBIO
-        t.transform.translation.y = self.position.position.y/1000
-        t.transform.translation.z = self.position.position.z/1000
+        # t.transform.translation.x = self.position.position.x/1000   # <-- CAMBIO
+        # t.transform.translation.y = self.position.position.y/1000
+        # t.transform.translation.z = self.position.position.z/1000
+        
+        t.transform.translation.x = self.position.position.x   # <-- CAMBIO
+        t.transform.translation.y = self.position.position.y
+        t.transform.translation.z = self.position.position.z
 
         # Rotation
         t.transform.rotation = self.position.orientation
