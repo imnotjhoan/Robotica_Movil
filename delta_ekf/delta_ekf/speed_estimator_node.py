@@ -34,8 +34,9 @@ from geometry_msgs.msg import Pose, TwistStamped
 MODELS: dict[int, dict] = {
     20: {"K": 0.19466, "tau": 0.16348, "u_dead": 19.002, "theta": 2.1170},
     22: {"K": 0.19466, "tau": 0.16348, "u_dead": 19.002, "theta": 2.1170},
-    25: {"K": 0.21662, "tau": 0.17514, "u_dead": 17.677, "theta": 1.5617},
-    28: {"K": 0.08083, "tau": 0.50192, "u_dead": 0.000,  "theta": 1.2233},
+    25: {"K": 0.20662, "tau": 0.17514, "u_dead": 17.677, "theta": 1.5617},
+    # 28: {"K": 0.08083, "tau": 0.50192, "u_dead": 0.000,  "theta": 1.2233}, # modelo original con porcentaje
+    28: {"K": 0.06383, "tau": 0.50192, "u_dead": 0.000,  "theta": 1.2233},
 }
 
 OPERATING_POINTS = sorted(MODELS.keys())          # [20, 22, 25, 28]
