@@ -33,6 +33,7 @@ setup(
             'tf_ph_nostamp_node = delta_ekf.tf_ph_nostamp_node:main',
             'speed_estimator_node = delta_ekf.speed_estimator_node:main',
             'madgwick_filter_node = delta_ekf.madgwick_filter_node:main',
+            'encoder_subs_node = delta_ekf.encoder_subs_node:main',
             # 'imu_stamper = delta_ekf.imu_stamper:main',
         ],
     },

@@ -6,20 +6,24 @@ twist_mux:
       ttc_brake:
         topic   : cmd_ttc
         timeout : 0.3 
-        priority: 255        # Highest priority - safety always overrides 
-      navegate_ttc_gap:
-        topic   : cmd_vel_ttc_gap
-        timeout : 0.3 
-        priority: 200 
+        priority: 200        # Highest priority - safety always overrides 
+      joystick  : 
+        topic   : cmd_vel_joy
+        timeout : 0.5
+        priority: 255
+      keyboard  : 
+        topic   : cmd_vel_key
+        timeout : 0.5
+        priority: 20
       navigation:
         topic   : cmd_vel_nav
         timeout : 0.5
         priority: 10
-      joystick  : 
-        topic   : cmd_vel_joy
+      wall_following:
+        topic   : cmd_vel_ctrl
         timeout : 0.5
-        priority: 100
-      keyboard  : 
-        topic   : cmd_vel_key
+        priority: 5
+      follow_the_gap:
+        topic   : cmd_vel_ttc_gap
         timeout : 0.5
-        priority: 50
+        priority: 5
