@@ -3,123 +3,126 @@
 import numpy as np
 import rclpy
 from rclpy.node import Node
+
 from sensor_msgs.msg import Imu, MagneticField
 from geometry_msgs.msg import Pose
 
+from delta_ekf.madgwick_filter import MadgwickAHRS
 
-class MadgwickAHRS:
-    def __init__(self, sample_period=0.02, beta=0.1):
-        self.sample_period = sample_period   # ✅ FIX CRÍTICO
-        self.beta = beta
-        self.quaternion = np.array([1.0, 0.0, 0.0, 0.0])
-
-    def update(self, gyroscope, accelerometer, magnetometer):
-        q = self.quaternion
-        gx, gy, gz = gyroscope
-        ax, ay, az = accelerometer
-        mx, my, mz = magnetometer
-
-        norm_acc = np.linalg.norm([ax, ay, az])
-        if norm_acc == 0.0:
-            return
-        ax, ay, az = ax/norm_acc, ay/norm_acc, az/norm_acc
-
-        norm_mag = np.linalg.norm([mx, my, mz])
-        use_mag = norm_mag > 0.0
-        if use_mag:
-            mx, my, mz = mx/norm_mag, my/norm_mag, mz/norm_mag
-
-        _2q1=2.*q[0]; _2q2=2.*q[1]; _2q3=2.*q[2]; _2q4=2.*q[3]
-        _4q1=4.*q[0]; _4q2=4.*q[1]; _4q3=4.*q[2]
-        _8q2=8.*q[1]; _8q3=8.*q[2]
-        q1q1=q[0]*q[0]; q2q2=q[1]*q[1]; q3q3=q[2]*q[2]; q4q4=q[3]*q[3]
-
-        s1 = _4q1*q3q3 + _2q3*ax + _4q1*q2q2 - _2q2*ay
-        s2 = (_4q2*q4q4 - _2q4*ax + 4.*q1q1*q[1] - _2q1*ay
-              - _4q2 + _8q2*q2q2 + _8q2*q3q3 + _4q2*az)
-        s3 = (4.*q1q1*q[2] + _2q1*ax + _4q3*q4q4 - _2q4*ay
-              - _4q3 + _8q3*q2q2 + _8q3*q3q3 + _4q3*az)
-        s4 = 4.*q2q2*q[3] - _2q2*ax + 4.*q3q3*q[3] - _2q3*ay
-
-        norm_s = np.linalg.norm([s1, s2, s3, s4])
-        if norm_s == 0.0:
-            return
-        s1,s2,s3,s4 = s1/norm_s, s2/norm_s, s3/norm_s, s4/norm_s
-
-        q_dot = 0.5*np.array([
-            -q[1]*gx - q[2]*gy - q[3]*gz,
-             q[0]*gx + q[2]*gz - q[3]*gy,
-             q[0]*gy - q[1]*gz + q[3]*gx,
-             q[0]*gz + q[1]*gy - q[2]*gx
-        ]) - self.beta*np.array([s1, s2, s3, s4])
-
-        q = q + q_dot * self.sample_period
-        self.quaternion = q / np.linalg.norm(q)
-
-    def get_yaw(self):
-        q = self.quaternion
-        return np.arctan2(
-            2.0*(q[0]*q[3] + q[1]*q[2]),
-            1.0 - 2.0*(q[2]**2 + q[3]**2)
-        )
+import tf2_ros
 
 
-def yaw_to_quaternion(yaw):
-    h = yaw * 0.5
-    return np.array([np.cos(h), 0.0, 0.0, np.sin(h)])
+SAMPLE_PERIOD = 1.0 / 10.0
+BETA = 0.05  
+FRAME_ID = "base_link"
 
 
-def conjugate(q):
-    return np.array([q[0], -q[1], -q[2], -q[3]])
+def quat_to_rot(qx, qy, qz, qw):
+    """Quaternion → rotation matrix (3x3)"""
+    return np.array([
+        [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qw*qz),     2*(qx*qz + qw*qy)],
+        [2*(qx*qy + qw*qz),     1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qw*qx)],
+        [2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx),     1 - 2*(qx*qx + qy*qy)]
+    ])
 
 
 class MadgwickNode(Node):
     def __init__(self):
-        super().__init__('madgwick_node')
+        super().__init__("madgwick_ahrs_node")
 
-        self.filter = MadgwickAHRS()
-        self.last_mag = np.zeros(3)
+        self._ahrs = MadgwickAHRS(sample_period=SAMPLE_PERIOD, beta=BETA)
+        self._latest_mag = np.array([1.0, 0.0, 0.0])
 
-        self.pub = self.create_publisher(Pose, '/madgwick/pose', 10)
-        self.create_subscription(Imu, '/imu/data_raw', self.imu_cb, 10)
-        self.create_subscription(MagneticField, '/imu/mag', self.mag_cb, 10)
+        self._pub = self.create_publisher(Pose, "/robot1/orientation", 10)
 
-    def mag_cb(self, msg):
-        self.last_mag = np.array([
+        self.create_subscription(MagneticField, "/imu/mag", self._mag_callback, 10)
+        self.create_subscription(Imu, "/imu/data_raw", self._imu_callback, 10)
+
+        # TF
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        self._R = None
+
+        self.get_logger().info("Madgwick + TF iniciado")
+
+    def _mag_callback(self, msg):
+        self._latest_mag = np.array([
             msg.magnetic_field.x,
             msg.magnetic_field.y,
             msg.magnetic_field.z,
         ])
 
-    def imu_cb(self, msg):
-        gyro = np.array([msg.angular_velocity.x,
-                         msg.angular_velocity.y,
-                         msg.angular_velocity.z])
+    def _get_rotation(self):
+        """Obtiene R (imu_link → base_link)"""
+        if self._R is not None:
+            return self._R
 
-        accel = np.array([msg.linear_acceleration.x,
-                          msg.linear_acceleration.y,
-                          msg.linear_acceleration.z])
+        try:
+            tf_msg = self._tf_buffer.lookup_transform(
+                "base_link",
+                "imu_link",
+                rclpy.time.Time()
+            )
 
-        self.filter.update(gyro, accel, self.last_mag)
+            q = tf_msg.transform.rotation
+            self._R = quat_to_rot(q.x, q.y, q.z, q.w)
 
-        yaw = self.filter.get_yaw()
-        q = yaw_to_quaternion(yaw)
+            self.get_logger().info(f"R cargada:\n{np.round(self._R, 3)}")
 
-        pose = Pose()
-        pose.orientation.w = float(q[0])
-        pose.orientation.x = float(q[1])
-        pose.orientation.y = float(q[2])
-        pose.orientation.z = float(q[3])
-        self.pub.publish(pose)
+        except Exception:
+            return None
+
+        return self._R
+
+    def _imu_callback(self, msg):
+        raw_gyro = np.array([
+            msg.angular_velocity.x,
+            msg.angular_velocity.y,
+            msg.angular_velocity.z,
+        ])
+
+        raw_accel = np.array([
+            msg.linear_acceleration.x,
+            msg.linear_acceleration.y,
+            msg.linear_acceleration.z,
+        ])
+
+        mag = self._latest_mag
+
+        R = self._get_rotation()
+        if R is None:
+            return
+
+        # 🔥 CORRECCIÓN CLAVE
+        gyro = R @ raw_gyro
+        accel = R @ raw_accel   # ← en tu caso esto es NECESARIO
+
+        self._ahrs.update(gyro, accel, mag)
+
+        q = self._ahrs.quaternion
+
+        pose_msg = Pose()
+        pose_msg.orientation.w = float(q[0])
+        pose_msg.orientation.x = float(q[1])
+        pose_msg.orientation.y = float(q[2])
+        pose_msg.orientation.z = float(q[3])
+
+        self.get_logger().info(f"accel corregido: {np.round(accel,2)}")
+
+        self._pub.publish(pose_msg)
 
 
-def main():
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
     node = MadgwickNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

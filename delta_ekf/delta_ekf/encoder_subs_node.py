@@ -1,166 +1,89 @@
 #!/usr/bin/env python3
-# coding=utf-8
-
-import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Imu, MagneticField
-from geometry_msgs.msg import TwistStamped, Pose
 
+import numpy as np
 
-class MadgwickAHRS:
-    def __init__(self, beta=0.1):
-        self.beta = beta
-        self.quaternion = np.array([1.0, 0.0, 0.0, 0.0])
-        self.sample_period = 0.02
+from std_msgs.msg import Float64
+from geometry_msgs.msg import Pose
+from sensor_msgs.msg import Joy
 
-    def update(self, gyro, accel, mag):
-        q = self.quaternion
-        gx, gy, gz = gyro
-        ax, ay, az = accel
-        mx, my, mz = mag
-
-        norm_acc = np.linalg.norm([ax, ay, az])
-        if norm_acc == 0.0:
-            return
-        ax, ay, az = ax/norm_acc, ay/norm_acc, az/norm_acc
-
-        norm_mag = np.linalg.norm([mx, my, mz])
-        if norm_mag > 0.0:
-            mx, my, mz = mx/norm_mag, my/norm_mag, mz/norm_mag
-
-        # (Gradiente simplificado)
-        s = np.array([0.0, 0.0, 0.0, 0.0])
-
-        q_dot = 0.5*np.array([
-            -q[1]*gx - q[2]*gy - q[3]*gz,
-             q[0]*gx + q[2]*gz - q[3]*gy,
-             q[0]*gy - q[1]*gz + q[3]*gx,
-             q[0]*gz + q[1]*gy - q[2]*gx
-        ]) - self.beta * s
-
-        q = q + q_dot * self.sample_period
-        self.quaternion = q / np.linalg.norm(q)
-
-    def get_yaw(self):
-        q = self.quaternion
-        return np.arctan2(
-            2.0*(q[0]*q[3] + q[1]*q[2]),
-            1.0 - 2.0*(q[2]**2 + q[3]**2)
-        )
-
-
-class FusionNode(Node):
+class OdometryFusionNode(Node):
     def __init__(self):
-        super().__init__('fusion_node')
+        super().__init__('odometry_fusion_node')
 
-        # Estado
+        # ── Estado ─────────────────────────────
         self.x = 0.0
         self.y = 0.0
-        self.yaw = 0.0
+        self.theta = 0.0
+        self.v = 0.0
+        self.back_button_pressed = False
 
-        self.last_time = None
-        self.last_imu_time = None
-        self.last_mag = np.zeros(3)
+        self.prev_time = self.get_clock().now()
 
-        self.DEADBAND = 0.02
+        # ── Parámetro del botón de retroceso ───
+        self.declare_parameter('back_button_index', 5)  # RB en Logitech F710
+        self.back_button_index = self.get_parameter('back_button_index').value
 
-        self.filter = MadgwickAHRS()
+        # ── Subscripciones ─────────────────────
+        self.create_subscription(Float64, '/encoder/vel', self.vel_cb, 10)
+        self.create_subscription(Pose, '/robot1/orientation', self.ori_cb, 10)
+        self.create_subscription(Joy, '/joy', self.joy_cb, 10)
 
-        # Subs
-        self.create_subscription(Imu, '/imu/data_raw', self.imu_cb, 10)
-        self.create_subscription(MagneticField, '/imu/mag', self.mag_cb, 10)
-        self.create_subscription(TwistStamped, '/encoder/vel', self.encoder_cb, 10)
-
+        # ── Publicador ─────────────────────────
         self.pub = self.create_publisher(Pose, '/robot1/pose', 10)
 
-    def mag_cb(self, msg):
-        self.last_mag = np.array([
-            msg.magnetic_field.x,
-            msg.magnetic_field.y,
-            msg.magnetic_field.z
-        ])
+    def joy_cb(self, msg: Joy):
+        if len(msg.buttons) > self.back_button_index:
+            self.back_button_pressed = (msg.buttons[self.back_button_index] == 1)
 
-    def imu_cb(self, msg):
-        current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    def vel_cb(self, msg):
+        self.v = msg.data
+        self.update()
 
-        if self.last_imu_time is None:
-            self.last_imu_time = current_time
+    def ori_cb(self, msg):
+        q = msg.orientation
+        self.theta = np.arctan2(
+            2.0 * (q.w*q.z + q.x*q.y),
+            1.0 - 2.0 * (q.y**2 + q.z**2)
+        )
+
+    def update(self):
+        now = self.get_clock().now()
+        dt = (now - self.prev_time).nanoseconds / 1e9
+        self.prev_time = now
+
+        if dt <= 0:
             return
 
-        dt = current_time - self.last_imu_time
-        self.last_imu_time = current_time
+        direccion = -1.0 if self.back_button_pressed else 1.0
 
-        if dt <= 0 or dt > 1.0:
-            return
+        self.x += self.v * np.cos(self.theta) * dt * direccion
+        self.y += self.v * np.sin(self.theta) * dt * direccion
 
-        self.filter.sample_period = dt
-
-        gyro = np.array([
-            msg.angular_velocity.x,
-            msg.angular_velocity.y,
-            msg.angular_velocity.z
-        ])
-
-        accel = np.array([
-            msg.linear_acceleration.x,
-            msg.linear_acceleration.y,
-            msg.linear_acceleration.z
-        ])
-
-        self.filter.update(gyro, accel, self.last_mag)
-        self.yaw = self.filter.get_yaw()
-
-    def encoder_cb(self, msg):
-        current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        v = msg.twist.linear.x
-
-        if self.last_time is None:
-            self.last_time = current_time
-            return
-
-        dt = current_time - self.last_time
-        self.last_time = current_time
-
-        if dt <= 0 or dt > 2.0:
-            return
-
-        # Deadband
-        if abs(v) < self.DEADBAND:
-            v = 0.0
-
-        # 🔥 Integración correcta 2D
-        self.x += v * np.cos(self.yaw) * dt
-        self.y += v * np.sin(self.yaw) * dt
-
-        # Cuaternión desde yaw
-        q = np.array([
-            np.cos(self.yaw/2),
-            0.0,
-            0.0,
-            np.sin(self.yaw/2)
-        ])
-
+        # ── Publicar pose completa ─────────────
         pose = Pose()
-        pose.position.x = float(self.x)
-        pose.position.y = float(self.y)
+        pose.position.x = self.x
+        pose.position.y = self.y
         pose.position.z = 0.0
 
-        pose.orientation.w = float(q[0])
-        pose.orientation.x = float(q[1])
-        pose.orientation.y = float(q[2])
-        pose.orientation.z = float(q[3])
+        pose.orientation.w = np.cos(self.theta/2)
+        pose.orientation.x = 0.0
+        pose.orientation.y = 0.0
+        pose.orientation.z = np.sin(self.theta/2)
 
         self.pub.publish(pose)
 
-
-def main():
-    rclpy.init()
-    node = FusionNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
+def main(args=None):
+    rclpy.init(args=args)
+    node = OdometryFusionNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
