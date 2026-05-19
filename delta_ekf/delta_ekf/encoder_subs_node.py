@@ -62,6 +62,9 @@ class OdometryFusionNode(Node):
         self.y += self.v * np.sin(self.theta) * dt * direccion
 
         # ── Publicar pose completa ─────────────
+        self.get_logger().info(
+                f"[X: {self.x:.2f} | Y:{self.y:2f} "
+         )  
         pose = Pose()
         pose.position.x = self.x
         pose.position.y = self.y

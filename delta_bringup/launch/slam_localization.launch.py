@@ -23,7 +23,7 @@ def generate_launch_description():
 
     declare_use_sim_time_argument = DeclareLaunchArgument(
         'use_sim_time',
-        default_value='true',
+        default_value='false',
         description='Use simulation/Gazebo clock')
     declare_slam_params_file_cmd = DeclareLaunchArgument(
         'slam_params_file',
@@ -44,10 +44,13 @@ def generate_launch_description():
         name='slam_toolbox',
         output='screen',
         namespace='',
-        parameters=[{
+        
+        parameters=[
+            slam_params_file, 
+            {
             'use_sim_time': use_sim_time,
             'mode': 'localization',
-            'map_file_name': '/home/jhoan/mrad_ws_2601_delta2/src/delta_gazebo/maps/obs_race_track_ser',
+            'map_file_name': '/home/jhoan/mrad_ws_2601_delta2/src/delta_gazebo/maps/final_map_ser',
             'map_start_pose': [0.0, 0.0, 0.0],
             'map_frame': 'map',
             'odom_frame': 'odom',

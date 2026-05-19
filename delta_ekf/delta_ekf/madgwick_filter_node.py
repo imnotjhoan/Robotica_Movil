@@ -13,7 +13,7 @@ import tf2_ros
 
 
 SAMPLE_PERIOD = 1.0 / 10.0
-BETA = 0.05  
+BETA = 0.02
 FRAME_ID = "base_link"
 
 
@@ -92,10 +92,9 @@ class MadgwickNode(Node):
         R = self._get_rotation()
         if R is None:
             return
-
-        # 🔥 CORRECCIÓN CLAVE
+        # corrección giroscopio y acelerometro
         gyro = R @ raw_gyro
-        accel = R @ raw_accel   # ← en tu caso esto es NECESARIO
+        accel = R @ raw_accel   
 
         self._ahrs.update(gyro, accel, mag)
 

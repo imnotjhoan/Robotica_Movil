@@ -1,0 +1,7 @@
+image: bloqueA_v1.pgm
+mode: trinary
+resolution: 0.050
+origin: [-11.791, -7.206, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
