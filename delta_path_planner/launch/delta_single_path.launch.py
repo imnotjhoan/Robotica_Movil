@@ -31,7 +31,7 @@ def generate_launch_description():
 		PythonLaunchDescriptionSource(
 			os.path.join(bringup_share, "launch", "gz_spawn.launch.py")
 		),
-		launch_arguments={"use_sim_time": use_sim_time, "gz_mode": "True"}.items(),
+		launch_arguments={"use_sim_time": use_sim_time, "gz_mode": "False"}.items(),
 	)
 
 	ekf_launch = IncludeLaunchDescription(
@@ -70,8 +70,7 @@ def generate_launch_description():
 			   "manual": False,
 			   "closed_loop": True,
 			   "num_points": 40,
-			   "waypoints_file": "/home/jhoan/mrad_ws_2601_delta2/src/delta_path_planner/waypoints_json/two_laps.json"}],
-
+			   "waypoints_file": "/home/santy-estrada/mrad_ws_2601_delta/src/delta_path_planner/waypoints_json/one_lap.json"}],
 		condition=IfCondition(use_waypoints),
 	)
 

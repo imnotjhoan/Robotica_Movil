@@ -6,7 +6,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Exec
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch.conditions import IfCondition, UnlessCondition  
+from launch.conditions import IfCondition, UnlessCondition
 
 import xacro
 
@@ -58,7 +58,7 @@ def generate_launch_description():
                 "gz_sim.launch.py",
             )
         ),
-        launch_arguments={"gz_args": ['-r  -v4 ', world], 'headless-rendering': 'true', 'on_exit_shutdown': 'true'}.items(),
+        launch_arguments={"gz_args": ['-r -s -v4 ', world], 'headless-rendering': 'true', 'on_exit_shutdown': 'true'}.items(),
         condition=UnlessCondition(LaunchConfiguration('gz_mode')),
     )
 
@@ -140,7 +140,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
         'gz_mode',
-        default_value='False',
+        default_value='True',
         description='Set to True to launch the specific node'
         ),
         gz_launch,

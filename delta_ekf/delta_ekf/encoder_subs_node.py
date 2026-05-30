@@ -30,7 +30,7 @@ class OdometryFusionNode(Node):
         self.create_subscription(Pose, '/robot1/orientation', self.ori_cb, 10)
         self.create_subscription(Joy, '/joy', self.joy_cb, 10)
 
-        # ── Publicador ─────────────────────────
+        # ── Publicador ─────────────────────────   
         self.pub = self.create_publisher(Pose, '/robot1/pose', 10)
 
     def joy_cb(self, msg: Joy):

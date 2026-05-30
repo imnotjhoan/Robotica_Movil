@@ -10,10 +10,7 @@ from launch_ros.actions import Node
 import xacro
 
 def generate_launch_description():
-    gazebo_pkg_name = "delta_gazebo"
     bringup_pkg_name = "delta_bringup"
-    description_pkg_name = "delta_description"
-
     
     joy_params = os.path.join(get_package_share_directory(bringup_pkg_name),'config','joystick.yaml')
 

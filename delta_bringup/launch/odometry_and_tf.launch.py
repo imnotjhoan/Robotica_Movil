@@ -10,12 +10,18 @@ from launch_ros.actions import Node
 def generate_launch_description():
 
     # =========================================================
-    # Launch existente
+    # Launch existentes
     # =========================================================
 
     rsp_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             "/home/jhoan/mrad_ws_2601_delta2/src/delta_bringup/launch/rsp.launch.py"
+        )
+    )
+
+    rc_joystick = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            "/home/jhoan/mrad_ws_2601_delta2/src/delta_bringup/launch/rc_car_joy.launch.py"
         )
     )
 
@@ -61,4 +67,5 @@ def generate_launch_description():
         madgwick_node,
         tf_node,
         encoder_node,
+        rc_joystick,
     ])

@@ -62,7 +62,7 @@ class MapMetricsLogger(Node):
         self._closed = False
 
         # ─── Archivo CSV ─────────────────────────────────────────────────
-        data_dir = os.path.abspath("/home/jhoan/mrad_ws_2601_delta2/src/delta_measure/data_path_tracking")
+        data_dir = os.path.abspath("/home/santy-estrada/mrad_ws_2601_delta/src/delta_measure/data")
         self.get_logger().info(f"Directorio de datos: {data_dir}")
         os.makedirs(data_dir, exist_ok=True)
 
@@ -214,56 +214,6 @@ class MapMetricsLogger(Node):
     def pose_cb(self, msg: Pose):
         self.latest_x = msg.position.x
         self.latest_y = msg.position.y
-    
-    # def pose_cb(self, msg: Pose):
-    #     self.latest_x = msg.position.x
-    #     self.latest_y = msg.position.y
-
-    #     # ── Igual que StanleyLogger: escribir aquí, no en cmd_cb ──
-    #     if not self.start_flag or self.start_time is None or self.last_clock is None:
-    #         return
-
-    #     x = self.latest_x
-    #     y = self.latest_y
-    #     sample_time = self.last_clock
-    #     elapsed = max(0.0, sample_time - self.start_time)
-
-    #     if self.prev_row_x is None or self.prev_row_y is None:
-    #         delta_distance = 0.0
-    #     else:
-    #         delta_distance = math.hypot(x - self.prev_row_x, y - self.prev_row_y)
-
-    #     self.total_distance += delta_distance
-    #     self.prev_row_x = x
-    #     self.prev_row_y = y
-
-    #     row = {
-    #         "row_type":             "sample",
-    #         "timestamp_s":          sample_time,
-    #         "elapsed_s":            elapsed,
-    #         "v_real":               self.v_real,   # ← último valor recibido de cmd_cb
-    #         "w_real":               self.w_real,
-    #         "brake":                self.pending_brake_events,
-    #         "x":                    x,
-    #         "y":                    y,
-    #         "distance_m":           self.total_distance,
-    #         "heading_error_rad":    self.heading_error,
-    #         "cross_track_error_m":  self.cross_track_error,
-    #         "controller_error":     self.controller_error,
-    #         "path_index":           None,
-    #         "path_x":               None,
-    #         "path_y":               None,
-    #     }
-
-    #     self.pending_brake_events = 0
-    #     self._writer.writerow(row)
-    #     self._csv_file.flush()
-
-
-    # def cmd_cb(self, msg: TwistStamped):
-    #     """Solo almacena velocidades — la escritura ocurre en pose_cb."""
-    #     self.v_real = msg.twist.linear.x
-    #     self.w_real = msg.twist.angular.z
 
     def path_cb(self, msg: Path):
         if self.path_saved:

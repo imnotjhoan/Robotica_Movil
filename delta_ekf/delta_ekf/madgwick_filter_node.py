@@ -67,7 +67,7 @@ class MadgwickNode(Node):
             q = tf_msg.transform.rotation
             self._R = quat_to_rot(q.x, q.y, q.z, q.w)
 
-            self.get_logger().info(f"R cargada:\n{np.round(self._R, 3)}")
+            #self.get_logger().info(f"R cargada:\n{np.round(self._R, 3)}")
 
         except Exception:
             return None
@@ -106,7 +106,7 @@ class MadgwickNode(Node):
         pose_msg.orientation.y = float(q[2])
         pose_msg.orientation.z = float(q[3])
 
-        self.get_logger().info(f"accel corregido: {np.round(accel,2)}")
+        #self.get_logger().info(f"accel corregido: {np.round(accel,2)}")
 
         self._pub.publish(pose_msg)
 
